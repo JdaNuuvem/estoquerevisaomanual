@@ -350,6 +350,7 @@ let S = {
   session: null,
   allSessions: [],
   viewFilialId: null, // loja que o admin esta visualizando no Dashboard/Relatorios/Auditoria (somente leitura)
+  salesCache: {}, // productId -> {last_sale_date, days_without_sale, ...}, vem de /api/sales-cache
   cameraStream: null,
   cameraActive: false,
   barcodeDetector: null,
@@ -546,6 +547,19 @@ async function loadSessions() {
     S.allSessions = r.sessions || [];
   } catch (e) {
     S.allSessions = [];
+  }
+}
+
+// Cache de "data da ultima venda" por produto, calculado no servidor
+// (persistido em sales_cache.json - so busca na API i9logic uma vez por
+// produto, depois sempre serve do cache). Usado pra mostrar a informacao
+// na lista de Produtos Existentes sem custar uma chamada por item.
+async function loadSalesCache() {
+  try {
+    const r = await apiGet('sales-cache');
+    S.salesCache = r.cache || {};
+  } catch (e) {
+    S.salesCache = S.salesCache || {};
   }
 }
 
@@ -1174,9 +1188,21 @@ function updateAuditUI() {
     const r = session.encontrados[id];
     return `<div class="recent-row" onclick="showProductDetailsById(${id})">
       <span><strong>${r.scannedAt}</strong> - ${r.descricao}</span>
-      <span style="color:var(--muted);font-size:.75rem">${r.ean}</span>
+      <span style="color:var(--muted);font-size:.75rem;text-align:right">${r.ean}<br>${fmtLastSale(id)}</span>
     </div>`;
   }).join('');
+}
+
+// Texto curto de "ultima venda" pra um productId, a partir do cache
+// carregado por loadSalesCache(). Sem entrada no cache = ainda nao
+// buscado no servidor (mostra "-" em vez de travar a tela numa chamada
+// individual por produto, que seria lenta - rate limit de 3s na API).
+function fmtLastSale(id) {
+  const s = S.salesCache[id];
+  if (!s || !s.last_sale_date) return s ? 'Sem venda registrada' : '-';
+  const d = new Date(s.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR');
+  const dias = s.days_without_sale != null ? ` (${s.days_without_sale}d)` : '';
+  return `Últ. venda: ${d}${dias}`;
 }
 
 function updateDashboardUI() {
@@ -1393,6 +1419,7 @@ async function switchView(view) {
   }
   else if (view === 'audit') {
     $('#audit-view').style.display = 'block';
+    loadSalesCache().then(() => { if (S.view === 'audit') updateAuditUI(); });
     if (S.isAdmin) {
       // Admin so visualiza (sem bipar) - abre direto em Produtos Existentes,
       // que e util pra ele; a aba Bipagem exige uma sessao propria que o

@@ -58,10 +58,12 @@ USERS_FILE = os.path.join(DATA_DIR, "users.json")
 CACHE_FILE = os.path.join(DATA_DIR, "cache_data.json")
 AUDIT_FILE = os.path.join(DATA_DIR, "audit_sessions.json")
 DEDUP_FILE = os.path.join(DATA_DIR, "dedup_groups.json")
+SALES_CACHE_FILE = os.path.join(DATA_DIR, "sales_cache.json")
 SEED_CACHE_FILE = os.path.join(APP_DIR, "cache_data.json")  # bundled with Docker image
 _audit_lock = threading.Lock()
 _users_lock = threading.Lock()
 _dedup_lock = threading.Lock()
+_sales_cache_lock = threading.Lock()
 
 HEADERS = {
     "X-Client-Id": CLIENT_ID,
@@ -857,8 +859,20 @@ def list_users():
     return jsonify({"ok": True, "users": public})
 
 
-@app.route("/api/sales/<int:idproduto>")
-def product_sales(idproduto):
+def _load_sales_cache():
+    try:
+        with open(SALES_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_sales_cache(cache):
+    with open(SALES_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False)
+
+
+def _fetch_sales_stats(idproduto):
     stats = {"idproduto": idproduto, "total_sales": 0, "total_qty": 0, "total_value": 0,
              "last_sale_date": None, "days_without_sale": None, "first_sale_date": None,
              "sales_by_filial": {}}
@@ -903,7 +917,28 @@ def product_sales(idproduto):
             last_dt = datetime.strptime(dates[0], "%Y-%m-%d").date()
             stats["days_without_sale"] = (date.today() - last_dt).days
 
-    return jsonify({"ok": True, "stats": stats})
+    return stats
+
+
+@app.route("/api/sales/<int:idproduto>")
+def product_sales(idproduto):
+    cache = _load_sales_cache()
+    cached = cache.get(str(idproduto))
+    if cached:
+        return jsonify({"ok": True, "stats": cached, "cached": True})
+
+    stats = _fetch_sales_stats(idproduto)
+    with _sales_cache_lock:
+        cache = _load_sales_cache()
+        cache[str(idproduto)] = stats
+        _save_sales_cache(cache)
+
+    return jsonify({"ok": True, "stats": stats, "cached": False})
+
+
+@app.route("/api/sales-cache")
+def sales_cache_bulk():
+    return jsonify({"ok": True, "cache": _load_sales_cache()})
 
 
 @app.route("/")
