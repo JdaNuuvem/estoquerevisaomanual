@@ -936,6 +936,34 @@ def product_sales(idproduto):
     return jsonify({"ok": True, "stats": stats, "cached": False})
 
 
+@app.route("/api/sales-raw/<int:idproduto>")
+def sales_raw(idproduto):
+    """Proxy de uma pagina de pedidos_produtos para um script auxiliar de
+    calculo (ex: vendas filtradas por ano) que precisa iterar TODOS os itens
+    historicos, nao so o resumo agregado de /api/sales. Usa o mesmo
+    _rate_limit() do processo, entao nunca dispara chamada paralela
+    descoordenada com outras rotinas de sincronizacao em andamento."""
+    page = request.args.get("page", 1, type=int)
+    _rate_limit()
+    resp = requests.get(f"{API_BASE}/pedidos_produtos", headers=HEADERS,
+                        params={"idproduto": idproduto, "page": page, "per_page": 200}, timeout=45)
+    body = resp.json()
+    if not body.get("ok"):
+        return jsonify({"ok": False, "error": body.get("error") or f"HTTP {resp.status_code}"}), 502
+    return jsonify({"ok": True, "data": body.get("data", []), "total": body.get("total", 0)})
+
+
+@app.route("/api/pedido-data/<int:idpedido>")
+def pedido_data(idpedido):
+    """Proxy pontual da data de um pedido, mesmo uso do endpoint acima."""
+    _rate_limit()
+    resp = requests.get(f"{API_BASE}/pedidos/{idpedido}", headers=HEADERS, timeout=45)
+    body = resp.json()
+    if not body.get("ok"):
+        return jsonify({"ok": False, "error": body.get("error") or f"HTTP {resp.status_code}"}), 502
+    return jsonify({"ok": True, "data": body.get("data", {}).get("data")})
+
+
 @app.route("/api/sales-cache")
 def sales_cache_bulk():
     return jsonify({"ok": True, "cache": _load_sales_cache()})
