@@ -1269,8 +1269,12 @@ def _run_last_sale_scan():
     try:
         while len(resultado) < total_catalogo * 0.98:
             _rate_limit()
+            # 'pedidos' nao aceita listagem sem filtro (REQUIRED_FILTER_MISSING) -
+            # 'data' e um dos filtros minimos aceitos, entao usamos uma janela
+            # bem ampla so para satisfazer a exigencia, sem de fato restringir.
             resp = requests.get(f"{API_BASE}/pedidos", headers=HEADERS,
-                                params={"page": page, "per_page": 200}, timeout=45)
+                                params={"data_de": "2015-01-01", "data_ate": "2030-12-31",
+                                        "page": page, "per_page": 200}, timeout=45)
             body = resp.json()
             if not body.get("ok"):
                 raise RuntimeError(f"falha ao listar pedidos pagina {page}: {body.get('error')}")
