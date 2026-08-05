@@ -83,6 +83,24 @@ def _rate_limit():
     _last_request_time = time.time()
 
 
+def _get_com_retry(path, params):
+    """GET com o mesmo retry/backoff exponencial de _paginated_fetch (10
+    tentativas, espera crescente ate 120s) para rotinas longas que rodam sem
+    supervisao - sem isso, um unico RATE_LIMIT_EXCEEDED temporario derruba a
+    rotina inteira em vez de so esperar e continuar."""
+    for attempt in range(10):
+        _rate_limit()
+        resp = requests.get(f"{API_BASE}/{path}", headers=HEADERS, params=params, timeout=45)
+        body = resp.json()
+        if resp.status_code == 429 or (not body.get("ok") and "RATE_LIMIT" in str(body.get("error", ""))):
+            wait = min(30 * (2 ** attempt), 120)
+            print(f"[retry] rate-limit em {path}, tentativa {attempt+1}/10, aguardando {wait}s...")
+            time.sleep(wait)
+            continue
+        return body
+    return body
+
+
 # ponytail: server-side cache, single source for all users
 CACHE = {"filiais": [], "produtos": [], "estoques": [], "precos": [], "ready": False, "loading": False, "progress": {}, "last_error": None}
 
@@ -937,16 +955,11 @@ def product_sales(idproduto):
 
 
 def _fetch_pedidos_produtos_pagina(idproduto, page):
-    _rate_limit()
-    resp = requests.get(f"{API_BASE}/pedidos_produtos", headers=HEADERS,
-                        params={"idproduto": idproduto, "page": page, "per_page": 200}, timeout=45)
-    return resp.json()
+    return _get_com_retry("pedidos_produtos", {"idproduto": idproduto, "page": page, "per_page": 200})
 
 
 def _fetch_pedido_data(idpedido):
-    _rate_limit()
-    resp = requests.get(f"{API_BASE}/pedidos/{idpedido}", headers=HEADERS, timeout=45)
-    return resp.json()
+    return _get_com_retry(f"pedidos/{idpedido}", {})
 
 
 @app.route("/api/sales-raw/<int:idproduto>")
@@ -1107,18 +1120,12 @@ VENDAS_2026_FULL_STATE = {"running": False, "phase": None, "processed": 0, "tota
 
 
 def _fetch_pedidos_por_data_pagina(page):
-    _rate_limit()
-    resp = requests.get(f"{API_BASE}/pedidos", headers=HEADERS,
-                        params={"data_de": "2026-01-01", "data_ate": "2026-12-31",
-                                "page": page, "per_page": 200}, timeout=45)
-    return resp.json()
+    return _get_com_retry("pedidos", {"data_de": "2026-01-01", "data_ate": "2026-12-31",
+                                       "page": page, "per_page": 200})
 
 
 def _fetch_pedidos_produtos_by_idpedido(idpedido, page):
-    _rate_limit()
-    resp = requests.get(f"{API_BASE}/pedidos_produtos", headers=HEADERS,
-                        params={"idpedido": idpedido, "page": page, "per_page": 200}, timeout=45)
-    return resp.json()
+    return _get_com_retry("pedidos_produtos", {"idpedido": idpedido, "page": page, "per_page": 200})
 
 
 def _run_vendas_2026_full():
