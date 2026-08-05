@@ -1098,6 +1098,140 @@ def sales_2026_status():
     return jsonify({"ok": True, "state": VENDAS_2026_STATE, "resultado": resultado})
 
 
+PEDIDOS_2026_IDS_FILE = os.path.join(DATA_DIR, "pedidos_2026_ids.json")
+VENDAS_2026_CATALOGO_FILE = os.path.join(DATA_DIR, "vendas_2026_catalogo.json")
+PEDIDOS_2026_PROCESSADOS_FILE = os.path.join(DATA_DIR, "pedidos_2026_processados.json")
+_vendas_2026_full_lock = threading.Lock()
+VENDAS_2026_FULL_STATE = {"running": False, "phase": None, "processed": 0, "total": 0,
+                           "started_at": None, "finished_at": None, "last_error": None}
+
+
+def _fetch_pedidos_por_data_pagina(page):
+    _rate_limit()
+    resp = requests.get(f"{API_BASE}/pedidos", headers=HEADERS,
+                        params={"data_de": "2026-01-01", "data_ate": "2026-12-31",
+                                "page": page, "per_page": 200}, timeout=45)
+    return resp.json()
+
+
+def _fetch_pedidos_produtos_by_idpedido(idpedido, page):
+    _rate_limit()
+    resp = requests.get(f"{API_BASE}/pedidos_produtos", headers=HEADERS,
+                        params={"idpedido": idpedido, "page": page, "per_page": 200}, timeout=45)
+    return resp.json()
+
+
+def _run_vendas_2026_full():
+    """Mesmo objetivo de _run_vendas_2026, mas para o catalogo inteiro em vez
+    de so os produtos ja bipados numa loja. Abordagem bem mais eficiente,
+    descoberta na documentacao publica da API (api.i9logic.net): o endpoint
+    'pedidos' aceita filtro por data (data_de/data_ate), diferente de
+    'pedidos_produtos' que nao tem campo de data. Entao em vez de abrir cada
+    pedido do HISTORICO INTEIRO de cada produto (abordagem de _run_vendas_2026,
+    inviavel em escala de catalogo - lariam semanas), aqui:
+    1. Lista so os pedidos de 2026 (rapido, ~185 mil pedidos / 200 por pagina).
+    2. Para cada um desses pedidos (nao mais por produto), busca os itens e
+       soma no produto correspondente.
+    Persiste a lista de IDs de pedidos de 2026 uma vez (fase 1) e depois vai
+    marcando cada pedido como processado (fase 2), para retomar exatamente de
+    onde parou se o processo reiniciar no meio dos ~6 dias estimados."""
+    VENDAS_2026_FULL_STATE["running"] = True
+    VENDAS_2026_FULL_STATE["started_at"] = datetime.now().isoformat()
+    VENDAS_2026_FULL_STATE["finished_at"] = None
+    VENDAS_2026_FULL_STATE["last_error"] = None
+
+    try:
+        ids = _load_json_file(PEDIDOS_2026_IDS_FILE, None)
+        if ids is None:
+            VENDAS_2026_FULL_STATE["phase"] = "listando_pedidos"
+            ids = []
+            page = 1
+            while True:
+                body = _fetch_pedidos_por_data_pagina(page)
+                if not body.get("ok"):
+                    raise RuntimeError(f"falha ao listar pedidos pagina {page}: {body.get('error')}")
+                data = body.get("data", [])
+                ids.extend(item["id"] for item in data)
+                total = body.get("total", 0)
+                VENDAS_2026_FULL_STATE["processed"] = len(ids)
+                VENDAS_2026_FULL_STATE["total"] = total
+                if len(ids) >= total or not data:
+                    break
+                page += 1
+            _save_json_file(PEDIDOS_2026_IDS_FILE, ids)
+
+        VENDAS_2026_FULL_STATE["phase"] = "detalhando_pedidos"
+        resultado = _load_json_file(VENDAS_2026_CATALOGO_FILE, {})
+        processados = set(_load_json_file(PEDIDOS_2026_PROCESSADOS_FILE, []))
+        VENDAS_2026_FULL_STATE["total"] = len(ids)
+        VENDAS_2026_FULL_STATE["processed"] = len(processados)
+
+        for idpedido in ids:
+            if idpedido in processados:
+                continue
+
+            itens = []
+            page = 1
+            while True:
+                body = _fetch_pedidos_produtos_by_idpedido(idpedido, page)
+                if not body.get("ok"):
+                    break
+                data = body.get("data", [])
+                itens.extend(data)
+                total = body.get("total", 0)
+                if len(itens) >= total or not data:
+                    break
+                page += 1
+
+            for item in itens:
+                pid = str(item["idproduto"])
+                entry = resultado.setdefault(pid, {"qtd_2026": 0, "valor_2026": 0.0, "vendas_2026": 0})
+                qtd = item.get("qtd") or 0
+                valor = item.get("valorvenda") or 0
+                entry["qtd_2026"] += qtd
+                entry["valor_2026"] += valor * qtd
+                entry["vendas_2026"] += 1
+
+            processados.add(idpedido)
+            VENDAS_2026_FULL_STATE["processed"] = len(processados)
+            if len(processados) % 50 == 0:
+                _save_json_file(VENDAS_2026_CATALOGO_FILE, resultado)
+                _save_json_file(PEDIDOS_2026_PROCESSADOS_FILE, list(processados))
+
+        _save_json_file(VENDAS_2026_CATALOGO_FILE, resultado)
+        _save_json_file(PEDIDOS_2026_PROCESSADOS_FILE, list(processados))
+    except Exception as exc:
+        VENDAS_2026_FULL_STATE["last_error"] = str(exc)
+    finally:
+        VENDAS_2026_FULL_STATE["running"] = False
+        VENDAS_2026_FULL_STATE["finished_at"] = datetime.now().isoformat()
+
+
+@app.route("/api/admin/sales-2026-full/start", methods=["POST"])
+def admin_sales_2026_full_start():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+    data = request.get_json(silent=True) or {}
+    if not _admin_password_ok(data.get("adminPassword")):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    with _vendas_2026_full_lock:
+        if VENDAS_2026_FULL_STATE["running"]:
+            return jsonify({"ok": False, "error": "Calculo ja esta rodando."}), 409
+        threading.Thread(target=_run_vendas_2026_full, daemon=True).start()
+    return jsonify({"ok": True, "message": "Calculo de vendas 2026 do catalogo inteiro iniciado em background."})
+
+
+@app.route("/api/sales-2026-full/status")
+def sales_2026_full_status():
+    total_produtos = len(_load_json_file(VENDAS_2026_CATALOGO_FILE, {}))
+    return jsonify({"ok": True, "state": VENDAS_2026_FULL_STATE, "produtos_com_venda_2026": total_produtos})
+
+
 @app.route("/api/sales-cache")
 def sales_cache_bulk():
     return jsonify({"ok": True, "cache": _load_sales_cache()})
