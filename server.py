@@ -936,32 +936,166 @@ def product_sales(idproduto):
     return jsonify({"ok": True, "stats": stats, "cached": False})
 
 
-@app.route("/api/sales-raw/<int:idproduto>")
-def sales_raw(idproduto):
-    """Proxy de uma pagina de pedidos_produtos para um script auxiliar de
-    calculo (ex: vendas filtradas por ano) que precisa iterar TODOS os itens
-    historicos, nao so o resumo agregado de /api/sales. Usa o mesmo
-    _rate_limit() do processo, entao nunca dispara chamada paralela
-    descoordenada com outras rotinas de sincronizacao em andamento."""
-    page = request.args.get("page", 1, type=int)
+def _fetch_pedidos_produtos_pagina(idproduto, page):
     _rate_limit()
     resp = requests.get(f"{API_BASE}/pedidos_produtos", headers=HEADERS,
                         params={"idproduto": idproduto, "page": page, "per_page": 200}, timeout=45)
-    body = resp.json()
+    return resp.json()
+
+
+def _fetch_pedido_data(idpedido):
+    _rate_limit()
+    resp = requests.get(f"{API_BASE}/pedidos/{idpedido}", headers=HEADERS, timeout=45)
+    return resp.json()
+
+
+@app.route("/api/sales-raw/<int:idproduto>")
+def sales_raw(idproduto):
+    """Proxy de uma pagina de pedidos_produtos para uso externo (debug/scripts
+    pontuais) que precise iterar TODOS os itens historicos, nao so o resumo
+    agregado de /api/sales. Usa o mesmo _rate_limit() do processo, entao nunca
+    dispara chamada paralela descoordenada com outras rotinas em andamento."""
+    page = request.args.get("page", 1, type=int)
+    body = _fetch_pedidos_produtos_pagina(idproduto, page)
     if not body.get("ok"):
-        return jsonify({"ok": False, "error": body.get("error") or f"HTTP {resp.status_code}"}), 502
+        return jsonify({"ok": False, "error": body.get("error") or "falha na API i9logic"}), 502
     return jsonify({"ok": True, "data": body.get("data", []), "total": body.get("total", 0)})
 
 
 @app.route("/api/pedido-data/<int:idpedido>")
 def pedido_data(idpedido):
     """Proxy pontual da data de um pedido, mesmo uso do endpoint acima."""
-    _rate_limit()
-    resp = requests.get(f"{API_BASE}/pedidos/{idpedido}", headers=HEADERS, timeout=45)
-    body = resp.json()
+    body = _fetch_pedido_data(idpedido)
     if not body.get("ok"):
-        return jsonify({"ok": False, "error": body.get("error") or f"HTTP {resp.status_code}"}), 502
+        return jsonify({"ok": False, "error": body.get("error") or "falha na API i9logic"}), 502
     return jsonify({"ok": True, "data": body.get("data", {}).get("data")})
+
+
+VENDAS_2026_FILE = os.path.join(DATA_DIR, "vendas_2026_por_produto.json")
+PEDIDO_DATAS_FILE = os.path.join(DATA_DIR, "pedido_datas_cache.json")
+_vendas_2026_lock = threading.Lock()
+VENDAS_2026_STATE = {"running": False, "processed": 0, "total": 0, "started_at": None,
+                      "finished_at": None, "last_error": None}
+
+
+def _load_json_file(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def _save_json_file(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+def _run_vendas_2026(filial_id):
+    """Calcula, para cada produto ja bipado na sessao mais recente da loja
+    informada, quanto foi vendido em 2026 (qtd/valor/numero de vendas). Nao ha
+    filtro de data no endpoint de pedidos da API i9logic, entao a unica forma
+    confiavel e abrir cada pedido individual e olhar a data. Roda numa thread
+    daemon separada (chamada via /api/admin/sales-2026/start) porque para um
+    catalogo bipado de centenas de produtos isso pode levar horas - persiste
+    incrementalmente em disco para nunca perder progresso caso o processo
+    reinicie no meio (redeploy, restart)."""
+    sessions = _load_audit()
+    session = next((s for s in sessions.values() if s["filialId"] == filial_id), None)
+    ids = list(session["encontrados"].keys()) if session else []
+
+    pedido_datas = _load_json_file(PEDIDO_DATAS_FILE, {})
+    resultado = _load_json_file(VENDAS_2026_FILE, {})
+
+    VENDAS_2026_STATE["running"] = True
+    VENDAS_2026_STATE["total"] = len(ids)
+    VENDAS_2026_STATE["processed"] = sum(1 for pid in ids if resultado.get(pid, {}).get("processado"))
+    VENDAS_2026_STATE["started_at"] = datetime.now().isoformat()
+    VENDAS_2026_STATE["finished_at"] = None
+    VENDAS_2026_STATE["last_error"] = None
+
+    try:
+        for pid in ids:
+            if resultado.get(pid, {}).get("processado"):
+                continue
+
+            itens = []
+            page = 1
+            while True:
+                body = _fetch_pedidos_produtos_pagina(int(pid), page)
+                if not body.get("ok"):
+                    break
+                data = body.get("data", [])
+                itens.extend(data)
+                total = body.get("total", 0)
+                if len(itens) >= total or not data:
+                    break
+                page += 1
+
+            qtd_2026 = 0
+            valor_2026 = 0.0
+            vendas_2026 = 0
+            novos_pedidos = 0
+            for item in itens:
+                idpedido = str(item["idpedido"])
+                if idpedido not in pedido_datas:
+                    b = _fetch_pedido_data(int(idpedido))
+                    pedido_datas[idpedido] = b.get("data", {}).get("data") if b.get("ok") else None
+                    novos_pedidos += 1
+                    if novos_pedidos % 25 == 0:
+                        _save_json_file(PEDIDO_DATAS_FILE, pedido_datas)
+                d = pedido_datas.get(idpedido)
+                if d and d.startswith("2026"):
+                    qtd = item.get("qtd") or 0
+                    valor = item.get("valorvenda") or 0
+                    qtd_2026 += qtd
+                    valor_2026 += valor * qtd
+                    vendas_2026 += 1
+
+            resultado[pid] = {
+                "qtd_2026": qtd_2026,
+                "valor_2026": round(valor_2026, 2),
+                "vendas_2026": vendas_2026,
+                "total_itens_historico": len(itens),
+                "processado": True,
+            }
+            _save_json_file(VENDAS_2026_FILE, resultado)
+            _save_json_file(PEDIDO_DATAS_FILE, pedido_datas)
+            VENDAS_2026_STATE["processed"] += 1
+    except Exception as exc:
+        VENDAS_2026_STATE["last_error"] = str(exc)
+    finally:
+        VENDAS_2026_STATE["running"] = False
+        VENDAS_2026_STATE["finished_at"] = datetime.now().isoformat()
+
+
+@app.route("/api/admin/sales-2026/start", methods=["POST"])
+def admin_sales_2026_start():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+    data = request.get_json(silent=True) or {}
+    if not _admin_password_ok(data.get("adminPassword")):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    filial_id = data.get("filialId")
+    if filial_id is None:
+        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+
+    with _vendas_2026_lock:
+        if VENDAS_2026_STATE["running"]:
+            return jsonify({"ok": False, "error": "Calculo ja esta rodando."}), 409
+        threading.Thread(target=_run_vendas_2026, args=(filial_id,), daemon=True).start()
+    return jsonify({"ok": True, "message": "Calculo de vendas 2026 iniciado em background."})
+
+
+@app.route("/api/sales-2026/status")
+def sales_2026_status():
+    resultado = _load_json_file(VENDAS_2026_FILE, {})
+    return jsonify({"ok": True, "state": VENDAS_2026_STATE, "resultado": resultado})
 
 
 @app.route("/api/sales-cache")
