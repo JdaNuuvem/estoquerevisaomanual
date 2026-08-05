@@ -1322,11 +1322,12 @@ function renderReportPage() {
   const totalPages = Math.ceil(reportData.length / REPORT_PAGE_SIZE);
 
   const thead = `<tr>
-    <th>SKU</th><th>Descrição</th><th>EAN</th><th>Categoria</th><th>Fornecedor</th><th>Tipo</th><th>Ativo</th><th>Encontrado</th>
+    <th>SKU</th><th>Descrição</th><th>EAN</th><th>Categoria</th><th>Fornecedor</th><th>Tipo</th><th>Ativo</th><th>Encontrado</th><th>Qtd Vendida</th><th>Valor Vendido</th><th>Última Venda</th>
   </tr>`;
   const viewSession = currentViewSession();
   const tbody = page.map(p => {
     const found = viewSession && viewSession.encontrados[p.id];
+    const sales = S.salesCache[p.id];
     return `<tr onclick="showProductDetailsById(${p.id})" style="cursor:pointer">
       <td>${fmt(p.codproduto) || '-'}</td>
       <td>${fmt(p.descricao)}</td>
@@ -1336,11 +1337,14 @@ function renderReportPage() {
       <td>${fmt(p.tipo)}</td>
       <td>${p.ativo === '0' ? '<span class="badge bg-nao-encontrado">Não</span>' : '<span class="badge bg-encontrado">Sim</span>'}</td>
       <td>${found ? '<span class="badge bg-encontrado">Sim</span>' : '<span class="badge bg-pendente">Não</span>'}</td>
+      <td>${sales ? fmtNum(sales.total_qty) : '-'}</td>
+      <td>${sales ? fmtMoney(sales.total_value) : '-'}</td>
+      <td style="font-size:.75rem">${sales && sales.last_sale_date ? new Date(sales.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR') : (sales ? 'Sem venda' : '-')}</td>
     </tr>`;
   }).join('');
 
   $('#report-table thead').innerHTML = thead;
-  $('#report-table tbody').innerHTML = tbody || '<tr><td colspan="8" style="text-align:center;padding:20px">Nenhum resultado.</td></tr>';
+  $('#report-table tbody').innerHTML = tbody || '<tr><td colspan="11" style="text-align:center;padding:20px">Nenhum resultado.</td></tr>';
 
   let pagHTML = `<span style="font-size:.85rem;color:var(--muted)">${reportData.length} itens | Página ${reportPage + 1} de ${totalPages || 1}</span>`;
   if (reportPage > 0) pagHTML += `<button class="btn-o btn-sm" onclick="reportPage--;renderReportPage()">Anterior</button>`;
@@ -1368,11 +1372,12 @@ function showClassReport(className) {
 function exportCSV() {
   const viewSession = currentViewSession();
   const isEncontrados = currentReport === 'encontrados' && viewSession;
-  const headers = ['SKU', 'Descrição', 'EAN', 'Categoria', 'Fornecedor', 'Tipo', 'Ativo', 'Encontrado'];
+  const headers = ['SKU', 'Descrição', 'EAN', 'Categoria', 'Fornecedor', 'Tipo', 'Ativo', 'Encontrado', 'Qtd Vendida', 'Valor Vendido', 'Data Última Venda'];
   if (isEncontrados) headers.push('Horário 1º Bipe', 'Qtd Contada', 'Estoque Sistema', 'Diferença');
   const rows = reportData.map(p => {
     const entry = viewSession ? viewSession.encontrados[p.id] : null;
     const found = entry ? 'Sim' : 'Não';
+    const sales = S.salesCache[p.id];
     const row = [
       fmt(p.codproduto),
       fmt(p.descricao).replace(/,/g, ' '),
@@ -1382,6 +1387,9 @@ function exportCSV() {
       fmt(p.tipo),
       p.ativo === '0' ? 'Não' : 'Sim',
       found,
+      sales ? sales.total_qty : '',
+      sales ? sales.total_value.toFixed(2) : '',
+      sales && sales.last_sale_date ? new Date(sales.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR') : '',
     ];
     if (isEncontrados) {
       const qtd = entry && entry.qtd != null ? entry.qtd : null;
@@ -1437,6 +1445,7 @@ async function switchView(view) {
   else if (view === 'reports') {
     $('#reports-view').style.display = 'block';
     renderReports();
+    loadSalesCache().then(() => { if (S.view === 'reports') renderReportPage(); });
     if (S.isAdmin) {
       await loadSessions();
       if (S.view === 'reports') renderReports();
