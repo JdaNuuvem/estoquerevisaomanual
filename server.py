@@ -1232,6 +1232,99 @@ def sales_2026_full_status():
     return jsonify({"ok": True, "state": VENDAS_2026_FULL_STATE, "produtos_com_venda_2026": total_produtos})
 
 
+LAST_SALE_FILE = os.path.join(DATA_DIR, "last_sale_por_produto.json")
+LAST_SALE_PAGE_FILE = os.path.join(DATA_DIR, "last_sale_progress.json")
+_last_sale_lock = threading.Lock()
+LAST_SALE_STATE = {"running": False, "pedidos_processados": 0, "produtos_cobertos": 0,
+                    "produtos_catalogo": 0, "started_at": None, "finished_at": None, "last_error": None}
+
+
+def _run_last_sale_scan():
+    """Numero de vendas + data da ultima venda de CADA produto do catalogo,
+    de uma vez so (nao filtrado por loja - a API i9logic nao expoe filial na
+    entidade pedidos_produtos). Estrategia: varre os pedidos do mais recente
+    para o mais antigo (ordenacao padrao da API e id DESC, que acompanha o
+    tempo); para cada pedido, olha os produtos vendidos nele. A PRIMEIRA vez
+    que um produto aparece (indo do mais recente pro mais antigo) e a data da
+    sua ultima venda - continua contando toda vez que reaparece. Para assim
+    que cobrir quase todo o catalogo, em vez de ter que abrir o historico
+    completo de cada produto individualmente (abordagem antiga, inviavel em
+    escala - dias a mais de 1 mes). Produtos raros que nunca aparecerem ficam
+    de fora do resultado (sem vendas no periodo varrido)."""
+    resultado = _load_json_file(LAST_SALE_FILE, {})
+    progress = _load_json_file(LAST_SALE_PAGE_FILE, {"next_page": 1})
+    page = progress.get("next_page", 1)
+
+    catalogo_ids = {str(p["id"]) for p in CACHE.get("produtos", [])}
+    total_catalogo = len(catalogo_ids) or 1
+
+    LAST_SALE_STATE["running"] = True
+    LAST_SALE_STATE["produtos_catalogo"] = len(catalogo_ids)
+    LAST_SALE_STATE["produtos_cobertos"] = len(resultado)
+    LAST_SALE_STATE["pedidos_processados"] = (page - 1) * 200
+    LAST_SALE_STATE["started_at"] = datetime.now().isoformat()
+    LAST_SALE_STATE["finished_at"] = None
+    LAST_SALE_STATE["last_error"] = None
+
+    try:
+        while len(resultado) < total_catalogo * 0.98:
+            _rate_limit()
+            resp = requests.get(f"{API_BASE}/pedidos", headers=HEADERS,
+                                params={"page": page, "per_page": 200}, timeout=45)
+            body = resp.json()
+            if not body.get("ok"):
+                raise RuntimeError(f"falha ao listar pedidos pagina {page}: {body.get('error')}")
+            pedidos = body.get("data", [])
+            if not pedidos:
+                break
+
+            for pedido in pedidos:
+                itens_body = _fetch_pedidos_produtos_by_idpedido(pedido["id"], 1)
+                if not itens_body.get("ok"):
+                    continue
+                for item in itens_body.get("data", []):
+                    pid = str(item["idproduto"])
+                    entry = resultado.setdefault(pid, {"last_sale_date": None, "vendas_count": 0})
+                    entry["vendas_count"] += 1
+                    if entry["last_sale_date"] is None:
+                        entry["last_sale_date"] = pedido.get("data")
+                LAST_SALE_STATE["pedidos_processados"] += 1
+
+            LAST_SALE_STATE["produtos_cobertos"] = len(resultado)
+            page += 1
+            _save_json_file(LAST_SALE_FILE, resultado)
+            _save_json_file(LAST_SALE_PAGE_FILE, {"next_page": page})
+    except Exception as exc:
+        LAST_SALE_STATE["last_error"] = str(exc)
+    finally:
+        LAST_SALE_STATE["running"] = False
+        LAST_SALE_STATE["finished_at"] = datetime.now().isoformat()
+
+
+@app.route("/api/admin/last-sale-scan/start", methods=["POST"])
+def admin_last_sale_scan_start():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+    data = request.get_json(silent=True) or {}
+    if not _admin_password_ok(data.get("adminPassword")):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    with _last_sale_lock:
+        if LAST_SALE_STATE["running"]:
+            return jsonify({"ok": False, "error": "Calculo ja esta rodando."}), 409
+        threading.Thread(target=_run_last_sale_scan, daemon=True).start()
+    return jsonify({"ok": True, "message": "Calculo de vendas/ultima venda iniciado em background."})
+
+
+@app.route("/api/last-sale-scan/status")
+def last_sale_scan_status():
+    return jsonify({"ok": True, "state": LAST_SALE_STATE})
+
+
 @app.route("/api/sales-cache")
 def sales_cache_bulk():
     return jsonify({"ok": True, "cache": _load_sales_cache()})
