@@ -86,6 +86,12 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
 #camera-modal .cam-controls{position:absolute;bottom:30px;left:50%;transform:translateX(-50%);display:flex;gap:12px}
 #camera-modal .close-btn{position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center}
 
+#contagem-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:300;display:none;align-items:center;justify-content:center;padding:16px}
+#contagem-modal.active{display:flex}
+#contagem-modal .qty-modal-content{background:var(--surface);border-radius:var(--radius);padding:24px;max-width:360px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.25)}
+#contagem-modal input[type=number]{border:2px solid var(--p300);border-radius:var(--radius);margin-top:8px}
+#contagem-modal input[type=number]:focus{border-color:var(--p500)}
+
 /* Reports */
 .report-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px}
 .report-tab{padding:8px 14px;font-size:.8rem;border-radius:8px;background:transparent;color:var(--muted);border:1px solid var(--border)}
@@ -197,6 +203,8 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         <button class="report-tab active" id="btn-mode-bipagem">Bipagem</button>
         <button class="report-tab" id="btn-mode-existentes">Produtos Existentes</button>
         <button class="report-tab" id="btn-mode-contado">Estoque Contado</button>
+        <button class="report-tab" id="btn-mode-contagem" style="display:none">Contagem</button>
+        <button class="btn-s btn-sm" id="btn-liberar-fase2" style="margin-left:auto;display:none">Liberar Contagem (Fase 2)</button>
       </div>
       <div class="audit-layout">
         <div class="scan-zone">
@@ -221,6 +229,16 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
           <div id="contado-panel" style="display:none">
             <h4 style="margin-top:8px">Estoque Contado (<span id="count-total">0</span>)</h4>
             <div class="recent-scans" id="count-list"></div>
+          </div>
+          <div id="contagem-panel" style="display:none">
+            <input id="contagem-scan-input" class="scan-input" placeholder="Bipe o código de barras aqui..." autocomplete="off" inputmode="numeric">
+            <div class="scan-actions">
+              <input id="contagem-manual-search" placeholder="Buscar por nome, SKU, EAN, NCM, fornecedor ou categoria..." style="flex:1;min-width:150px">
+            </div>
+            <div id="contagem-feedback" class="scan-feedback"></div>
+            <div id="contagem-search-results" style="display:none"></div>
+            <h4 style="margin-top:8px">Contagem (<span id="contagem-total">0</span>)</h4>
+            <div class="recent-scans" id="contagem-list"></div>
           </div>
         </div>
         <div class="product-panel" id="product-panel">
@@ -321,6 +339,19 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
   </div>
 </div>
 
+<!-- CONTAGEM MODAL (Fase 2) -->
+<div id="contagem-modal">
+  <div class="qty-modal-content">
+    <h3 id="contagem-modal-produto" style="margin-bottom:4px"></h3>
+    <p style="color:var(--muted);font-size:.85rem;margin-bottom:8px">Quantas unidades temos?</p>
+    <input type="number" id="contagem-modal-input" min="0" inputmode="numeric" style="font-size:1.5rem;text-align:center;width:100%;padding:12px">
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn-o" id="btn-contagem-cancelar" style="flex:1">Cancelar</button>
+      <button class="btn-p" id="btn-contagem-enviar" style="flex:1">Enviar</button>
+    </div>
+  </div>
+</div>
+
 <!-- TOAST -->
 <div id="toast"></div>
 
@@ -355,6 +386,7 @@ let S = {
   allSessions: [],
   viewFilialId: null, // loja que o admin esta visualizando no Dashboard/Relatorios/Auditoria (somente leitura)
   salesCache: {}, // productId -> {last_sale_date, days_without_sale, ...}, vem de /api/sales-cache
+  fase2PorFilial: {}, // filialId (string) -> true, lojas que ja liberaram a Contagem (Fase 2)
   cameraStream: null,
   cameraActive: false,
   barcodeDetector: null,
@@ -537,10 +569,13 @@ function syncScanToServer(productId, ean, descricao) {
   }).then(r => r.json()).then(r => {
     if (!r.ok) { toast('Aviso: falha ao salvar bipagem no servidor — ' + r.error, 'warn'); return; }
     if (r.entry) {
-      S.session.encontrados[productId] = r.entry;
+      // merge (nao substitui o objeto) - r.entry nao tem qtd/qtdSistema, e o
+      // fluxo de Contagem (Fase 2) pode ja ter setado esses campos localmente
+      // via setCountForProduct antes desta resposta do /scan chegar.
+      Object.assign(S.session.encontrados[productId] || (S.session.encontrados[productId] = {}), r.entry);
       updateScanStats();
       if (S.auditPanel === 'existentes') updateAuditUI();
-      else if (S.auditPanel === 'contado') renderCountList();
+      else renderActiveCountList();
     }
   }).catch(() => toast('Aviso: sem conexão para salvar bipagem no servidor.', 'warn'));
 }
@@ -565,6 +600,59 @@ async function loadSalesCache() {
   } catch (e) {
     S.salesCache = S.salesCache || {};
   }
+}
+
+// Lojas que ja liberaram a Contagem (Fase 2) - troca o fluxo de "bipar
+// repetido, +1 por bipe" (Estoque Contado) por "bipar 1x, digitar o total"
+// (Contagem). Fica num arquivo proprio (nao dentro da sessao de auditoria)
+// porque a sessao e por loja+dia e reseta a cada virada de dia - a decisao
+// de liberar e da loja, permanente, nao deveria precisar ser refeita
+// todo dia.
+async function loadFase2() {
+  try {
+    const r = await apiGet('audit/fase2');
+    S.fase2PorFilial = r.liberadas || {};
+  } catch (e) {
+    S.fase2PorFilial = S.fase2PorFilial || {};
+  }
+}
+
+function isFase2Liberada(filialId) {
+  return !!S.fase2PorFilial[String(filialId)];
+}
+
+async function liberarFase2() {
+  const filialId = currentViewFilialId();
+  if (!filialId) return;
+  if (!confirm('Liberar Contagem (Fase 2) para esta loja?\n\nA aba "Estoque Contado" vai ser substituída por "Contagem" - bipar 1x e informar a quantidade total em vez de bipar repetidamente.')) return;
+  try {
+    const resp = await fetch('/api/audit/fase2/liberar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filialId }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro ao liberar: ' + r.error, 'err'); return; }
+    S.fase2PorFilial = r.liberadas || {};
+    updateAuditTabsVisibility();
+    switchAuditPanel('contagem');
+    toast('Contagem (Fase 2) liberada para esta loja.', 'ok');
+  } catch (e) {
+    toast('Erro ao liberar: sem conexão com o servidor.', 'err');
+  }
+}
+
+// Mostra/esconde Estoque Contado vs Contagem vs botao de liberar, de
+// acordo com se a loja em foco (bipador: a propria; admin: a selecionada
+// no cabecalho) ja liberou a Fase 2.
+function updateAuditTabsVisibility() {
+  const filialId = currentViewFilialId();
+  const liberada = filialId ? isFase2Liberada(filialId) : false;
+  $('#btn-mode-contado').style.display = liberada ? 'none' : '';
+  $('#btn-mode-contagem').style.display = liberada ? '' : 'none';
+  $('#btn-liberar-fase2').style.display = (!S.isAdmin && filialId && !liberada) ? '' : 'none';
+  if (liberada && S.auditPanel === 'contado') switchAuditPanel('contagem');
+  else if (!liberada && S.auditPanel === 'contagem') switchAuditPanel('bipagem');
 }
 
 /* ===== PRODUCT LOOKUP ===== */
@@ -777,8 +865,8 @@ function updateScanStats() {
   $('#stat-contados').textContent = contados;
 }
 
-function showScanFeedback(msg, type) {
-  const el = $('#scan-feedback');
+function showScanFeedback(msg, type, elId = '#scan-feedback') {
+  const el = $(elId);
   el.textContent = msg;
   el.className = 'scan-feedback fb-' + (type === 'err' ? 'err' : type === 'dup' ? 'dup' : 'ok');
   clearTimeout(el._timer);
@@ -1058,7 +1146,7 @@ function applyCountDelta(productId, delta) {
     };
   }
   entry.qtd = Math.max(0, (entry.qtd || 0) + delta);
-  renderCountList();
+  renderActiveCountList();
   syncCountToServer(productId, entry.ean, entry.descricao, { delta });
 }
 
@@ -1073,7 +1161,7 @@ function setCountForProduct(productId, qtd) {
     };
   }
   entry.qtd = Math.max(0, qtd);
-  renderCountList();
+  renderActiveCountList();
   syncCountToServer(productId, entry.ean, entry.descricao, { qtd: entry.qtd });
 }
 
@@ -1106,16 +1194,30 @@ function syncCountToServer(productId, ean, descricao, payload) {
       entry.qtdSistemaDisponivel = r.qtdSistemaDisponivel;
       entry.qtdSistema = r.qtdSistemaDisponivel ? r.qtdSistema : null;
       entry.diferenca = r.qtdSistemaDisponivel ? (entry.qtd - r.qtdSistema) : null;
-      renderCountList();
+      renderActiveCountList();
     }
   }).catch(() => toast('Aviso: sem conexão para salvar contagem.', 'warn'));
 }
 
-function renderCountList() {
+// Chamado pelas funcoes de escrita (applyCountDelta/setCountForProduct),
+// usadas tanto pelo fluxo antigo (-1/+1 na aba Estoque Contado) quanto
+// pelo modal de Contagem (Fase 2) - atualiza a lista do painel que
+// estiver de fato aberto no momento.
+function renderActiveCountList() {
+  if (S.auditPanel === 'contagem') renderCountList('contagem');
+  else if (S.auditPanel === 'contado') renderCountList('contado');
+}
+
+// mode 'contado' = aba antiga (-1/+1/input direto); 'contagem' = Fase 2
+// (bipar 1x reabre o modal de quantidade em vez de editar aqui - por isso
+// nunca mostra os controles, mesmo pro dono da sessao).
+function renderCountList(mode = 'contado') {
+  const listId = mode === 'contagem' ? '#contagem-list' : '#count-list';
+  const totalId = mode === 'contagem' ? '#contagem-total' : '#count-total';
   const session = currentViewSession();
   if (!session) {
-    $('#count-total').textContent = '0';
-    $('#count-list').innerHTML = S.isAdmin
+    $(totalId).textContent = '0';
+    $(listId).innerHTML = S.isAdmin
       ? '<div class="empty">Selecione uma loja no seletor do cabeçalho para ver o estoque contado.</div>'
       : '';
     return;
@@ -1123,17 +1225,17 @@ function renderCountList() {
   // Somente o bipador dono da sessao pode editar contagem por aqui; admin
   // visualizando a sessao real de uma loja (currentViewSession() != S.session)
   // ve os mesmos dados, mas sem os controles de +1/-1/edicao manual.
-  const editable = session === S.session;
+  const editable = mode === 'contado' && session === S.session;
   // Entradas criadas por bipagem/contagem sempre têm a chave `qtd`; entradas
   // criadas só pela Verificação (markFound/audit_scan) nunca têm — por isso
   // `qtd != null` distingue "contado (mesmo que 0)" de "só verificado",
   // permitindo mostrar uma contagem zerada em vez de escondê-la da lista.
   const entries = Object.entries(session.encontrados).filter(([, r]) => r.qtd != null);
-  $('#count-total').textContent = entries.length;
+  $(totalId).textContent = entries.length;
   // Mesmo padrão de updateAuditUI: mais recente primeiro (ordem de inserção
   // das chaves reversa) e lista limitada a 100 linhas.
   const items = entries.reverse().slice(0, 100);
-  $('#count-list').innerHTML = items.map(([id, r]) => {
+  $(listId).innerHTML = items.map(([id, r]) => {
     const semDados = r.qtdSistemaDisponivel === false;
     const sistemaTxt = semDados ? '—' : (r.qtdSistema != null ? r.qtdSistema : '...');
     const diferencaTxt = semDados ? '—' : (r.diferenca != null ? (r.diferenca > 0 ? '+' : '') + r.diferenca : '...');
@@ -1143,8 +1245,9 @@ function renderCountList() {
                onchange="setCountForProduct(${id}, parseInt(this.value)||0)">
         <button class="btn-o btn-sm" onclick="applyCountDelta(${id}, 1)">+1</button>` : `
         <strong style="width:70px;text-align:center">${r.qtd}</strong>`;
+    const rowClick = mode === 'contagem' ? `onclick="registerHitContagem(S.productsMap[${id}])"` : '';
     return `
-    <div class="recent-row" style="flex-direction:column;align-items:stretch;gap:6px;cursor:default">
+    <div class="recent-row" style="flex-direction:column;align-items:stretch;gap:6px;cursor:${mode === 'contagem' ? 'pointer' : 'default'}" ${rowClick}>
       <div style="display:flex;justify-content:space-between">
         <strong>${r.descricao}</strong>
         <span style="color:var(--muted);font-size:.75rem">${r.ean}</span>
@@ -1160,18 +1263,123 @@ function renderCountList() {
   }).join('');
 }
 
+/* ===== CONTAGEM FASE 2 (bipar 1x -> modal "quantas unidades temos?") ===== */
+let contagemProdutoAtual = null;
+
+function dispatchScanContagem(barcode) {
+  if (!barcode) return;
+  const matches = findByEan(barcode);
+  if (!matches || matches.length === 0) {
+    showScanFeedback('❌ CÓDIGO NÃO ENCONTRADO NO CATÁLOGO', 'err', '#contagem-feedback');
+    return;
+  }
+  registerHitContagem(matches[0]);
+}
+
+function registerHitContagem(product) {
+  if (!S.session) { toast('Inicie uma auditoria primeiro.', 'err'); return; }
+  if (!product) return;
+  abrirModalContagem(product);
+}
+
+function abrirModalContagem(product) {
+  contagemProdutoAtual = product;
+  const entry = S.session.encontrados[product.id];
+  $('#contagem-modal-produto').textContent = product.descricao;
+  $('#contagem-modal-input').value = entry && entry.qtd != null ? entry.qtd : '';
+  $('#contagem-modal').classList.add('active');
+  setTimeout(() => { $('#contagem-modal-input').focus(); $('#contagem-modal-input').select(); }, 50);
+}
+
+function fecharModalContagem() {
+  $('#contagem-modal').classList.remove('active');
+  contagemProdutoAtual = null;
+  $('#contagem-scan-input').focus();
+}
+
+// 1o bipe de um produto na Contagem confirma existencia (markFound) e ja
+// abre o modal de quantidade no mesmo bipe - diferente do fluxo antigo
+// (Bipagem), aqui nao precisa bipar 2x pra comecar a contar.
+function confirmarContagem() {
+  if (!contagemProdutoAtual) return;
+  const p = contagemProdutoAtual;
+  const qtd = Math.max(0, parseInt($('#contagem-modal-input').value) || 0);
+  if (!S.session.encontrados[p.id]) {
+    markFound(p.id, fmt(p.ean) || 'manual', fmt(p.descricao));
+  }
+  setCountForProduct(p.id, qtd);
+  showScanFeedback(`✅ ${p.descricao}: ${qtd} un.`, 'ok', '#contagem-feedback');
+  playBeep();
+  showProductDetails(p);
+  updateScanStats();
+  fecharModalContagem();
+}
+
+function selectManualProductContagem(productId) {
+  const p = S.productsMap[productId];
+  if (!p) return;
+  registerHitContagem(p);
+  $('#contagem-search-results').style.display = 'none';
+  $('#contagem-manual-search').value = '';
+}
+
+function renderSearchResultsContagem(products) {
+  const el = $('#contagem-search-results');
+  if (!products || products.length === 0) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'block';
+  el.style.maxHeight = '300px';
+  el.style.overflowY = 'auto';
+  el.style.background = 'var(--surface)';
+  el.style.border = '1px solid var(--border)';
+  el.style.borderRadius = 'var(--radius)';
+  el.style.padding = '8px';
+  el.innerHTML = products.slice(0, 20).map(p => `
+    <div style="padding:8px;cursor:pointer;border-bottom:1px solid var(--border);font-size:.85rem"
+         onclick="selectManualProductContagem(${p.id})">
+      <strong>${fmt(p.codproduto)}</strong> - ${fmt(p.descricao)}
+      <span style="color:var(--muted);font-size:.75rem">EAN: ${fmt(p.ean) || 'sem código'}</span>
+    </div>
+  `).join('');
+}
+
+const doSearchContagem = debounce((q) => {
+  if (!q) { $('#contagem-search-results').style.display = 'none'; return; }
+  renderSearchResultsContagem(findByText(q));
+}, 300);
+
+function initScannerInputContagem() {
+  const inp = $('#contagem-scan-input');
+  if (!inp) return;
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const val = inp.value.trim();
+      inp.value = '';
+      if (!val) return;
+      dispatchScanContagem(val);
+    }
+  });
+}
+
 function switchAuditPanel(panel) {
   S.auditPanel = panel;
   $('#btn-mode-bipagem').classList.toggle('active', panel === 'bipagem');
   $('#btn-mode-existentes').classList.toggle('active', panel === 'existentes');
   $('#btn-mode-contado').classList.toggle('active', panel === 'contado');
+  $('#btn-mode-contagem').classList.toggle('active', panel === 'contagem');
   $('#bipagem-panel').style.display = panel === 'bipagem' ? 'block' : 'none';
   $('#existentes-panel').style.display = panel === 'existentes' ? 'block' : 'none';
   $('#contado-panel').style.display = panel === 'contado' ? 'block' : 'none';
+  $('#contagem-panel').style.display = panel === 'contagem' ? 'block' : 'none';
   $('#search-results').style.display = 'none';
+  $('#contagem-search-results').style.display = 'none';
   updateScanStats();
   if (panel === 'existentes') updateAuditUI();
-  else if (panel === 'contado') renderCountList();
+  else if (panel === 'contado') renderCountList('contado');
+  else if (panel === 'contagem') { renderCountList('contagem'); setTimeout(() => $('#contagem-scan-input').focus(), 200); }
 }
 
 /* ===== UI UPDATES ===== */
@@ -1467,6 +1675,8 @@ async function switchView(view) {
   else if (view === 'audit') {
     $('#audit-view').style.display = 'block';
     loadSalesCache().then(() => { if (S.view === 'audit') updateAuditUI(); });
+    await loadFase2();
+    updateAuditTabsVisibility();
     if (S.isAdmin) {
       // Admin so visualiza (sem bipar) - abre direto em Produtos Existentes,
       // que e util pra ele; a aba Bipagem exige uma sessao propria que o
@@ -1625,7 +1835,7 @@ async function handleViewFilialChange(filialId) {
   await loadSessions();
   if (S.view === 'dashboard') renderDashboard();
   else if (S.view === 'reports') renderReports();
-  else if (S.view === 'audit') { updateAuditUI(); renderCountList(); }
+  else if (S.view === 'audit') { updateAuditTabsVisibility(); updateAuditUI(); renderActiveCountList(); }
 }
 
 // Clique numa loja em "Progresso por Loja" (Dashboard) - atalho pra ver o
@@ -2051,6 +2261,33 @@ async function init() {
   $('#btn-mode-bipagem').addEventListener('click', () => switchAuditPanel('bipagem'));
   $('#btn-mode-existentes').addEventListener('click', () => switchAuditPanel('existentes'));
   $('#btn-mode-contado').addEventListener('click', () => switchAuditPanel('contado'));
+  $('#btn-mode-contagem').addEventListener('click', () => switchAuditPanel('contagem'));
+  $('#btn-liberar-fase2').addEventListener('click', liberarFase2);
+
+  // Event: contagem (Fase 2) - busca manual e modal de quantidade
+  $('#contagem-manual-search').addEventListener('input', (e) => doSearchContagem(e.target.value));
+  $('#contagem-manual-search').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const val = $('#contagem-manual-search').value.trim();
+    if (!val) return;
+    const resolved = resolveProduct(val);
+    if (resolved.type === 'none') {
+      showScanFeedback('❌ CÓDIGO NÃO ENCONTRADO NO CATÁLOGO', 'err', '#contagem-feedback');
+      return;
+    }
+    if (resolved.type === 'ncm') {
+      renderSearchResultsContagem(resolved.matches);
+      return;
+    }
+    selectManualProductContagem(resolved.matches[0].id);
+  });
+  $('#btn-contagem-cancelar').addEventListener('click', fecharModalContagem);
+  $('#btn-contagem-enviar').addEventListener('click', confirmarContagem);
+  $('#contagem-modal-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); confirmarContagem(); }
+  });
+  initScannerInputContagem();
 
   // Event: report tabs
   $('#report-tabs').addEventListener('click', (e) => {

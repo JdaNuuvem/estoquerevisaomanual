@@ -330,6 +330,27 @@ def audit_sessions():
     return jsonify({"ok": True, "sessions": list(sessions.values())})
 
 
+FASE2_FILE = os.path.join(DATA_DIR, "fase2_liberada.json")
+
+
+@app.route("/api/audit/fase2", methods=["GET"])
+def audit_fase2_status():
+    return jsonify({"ok": True, "liberadas": _load_json_file(FASE2_FILE, {})})
+
+
+@app.route("/api/audit/fase2/liberar", methods=["POST"])
+def audit_fase2_liberar():
+    data = request.get_json(silent=True) or {}
+    filial_id = data.get("filialId")
+    if filial_id is None:
+        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+    with _audit_lock:
+        liberadas = _load_json_file(FASE2_FILE, {})
+        liberadas[str(filial_id)] = True
+        _save_json_file(FASE2_FILE, liberadas)
+    return jsonify({"ok": True, "liberadas": liberadas})
+
+
 @app.route("/api/audit/session/start", methods=["POST"])
 def audit_session_start():
     data = request.get_json(silent=True) or {}
