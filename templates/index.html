@@ -247,6 +247,10 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
           <option value="preco_desc">Preço ↓</option>
           <option value="estoque_asc">Estoque ↑</option>
           <option value="estoque_desc">Estoque ↓</option>
+          <option value="venda_recente">Última Venda (recente primeiro)</option>
+          <option value="venda_antiga">Última Venda (antiga primeiro)</option>
+          <option value="qtdvendida_desc">Qtd Vendida ↓</option>
+          <option value="qtdvendida_asc">Qtd Vendida ↑</option>
         </select>
         <button class="btn-s btn-sm" id="btn-export-csv">Exportar CSV</button>
       </div>
@@ -1311,6 +1315,25 @@ function loadReport() {
   else if (sort === 'preco_desc') data.sort((a, b) => (S.pricesMap[b.id]?.precovenda || 0) - (S.pricesMap[a.id]?.precovenda || 0));
   else if (sort === 'estoque_asc') data.sort((a, b) => (S.stockMap['' + currentViewFilialId() + '_' + a.id] || 0) - (S.stockMap['' + currentViewFilialId() + '_' + b.id] || 0));
   else if (sort === 'estoque_desc') data.sort((a, b) => (S.stockMap['' + currentViewFilialId() + '_' + b.id] || 0) - (S.stockMap['' + currentViewFilialId() + '_' + a.id] || 0));
+  // Produtos sem venda (S.salesCache[id] ausente ou sem last_sale_date) sempre
+  // vao pro final, nas duas direcoes - "sem venda" nao e nem "mais recente"
+  // nem "mais antiga", e um terceiro estado que nao deve se misturar aos dois.
+  else if (sort === 'venda_recente') data.sort((a, b) => {
+    const da = S.salesCache[a.id]?.last_sale_date, db = S.salesCache[b.id]?.last_sale_date;
+    if (!da && !db) return 0;
+    if (!da) return 1;
+    if (!db) return -1;
+    return db.localeCompare(da);
+  });
+  else if (sort === 'venda_antiga') data.sort((a, b) => {
+    const da = S.salesCache[a.id]?.last_sale_date, db = S.salesCache[b.id]?.last_sale_date;
+    if (!da && !db) return 0;
+    if (!da) return 1;
+    if (!db) return -1;
+    return da.localeCompare(db);
+  });
+  else if (sort === 'qtdvendida_desc') data.sort((a, b) => (S.salesCache[b.id]?.total_qty || 0) - (S.salesCache[a.id]?.total_qty || 0));
+  else if (sort === 'qtdvendida_asc') data.sort((a, b) => (S.salesCache[a.id]?.total_qty || 0) - (S.salesCache[b.id]?.total_qty || 0));
   reportData = data;
   reportPage = 0;
   renderReportPage();
@@ -1372,33 +1395,49 @@ function showClassReport(className) {
 function exportCSV() {
   const viewSession = currentViewSession();
   const isEncontrados = currentReport === 'encontrados' && viewSession;
-  const headers = ['SKU', 'Descrição', 'EAN', 'Categoria', 'Fornecedor', 'Tipo', 'Ativo', 'Encontrado', 'Qtd Vendida', 'Valor Vendido', 'Data Última Venda'];
-  if (isEncontrados) headers.push('Horário 1º Bipe', 'Qtd Contada', 'Estoque Sistema', 'Diferença');
+  const filialId = currentViewFilialId();
+  const headers = [
+    'SKU', 'Descrição', 'EAN', 'Referência', 'Categoria', 'Marca', 'Fornecedor', 'Tipo', 'NCM',
+    'Unidade', 'Peso', 'Origem', 'Ativo', 'Encontrado',
+    'Preço Venda', 'Preço Custo', 'Estoque Sistema (loja)',
+    'Qtd Vendida', 'Valor Vendido', 'Data Última Venda', 'Nº de Vendas',
+  ];
+  if (isEncontrados) headers.push('Horário 1º Bipe', 'Qtd Contada', 'Diferença');
   const rows = reportData.map(p => {
     const entry = viewSession ? viewSession.encontrados[p.id] : null;
     const found = entry ? 'Sim' : 'Não';
     const sales = S.salesCache[p.id];
+    const preco = S.pricesMap[p.id];
+    const estoqueSistema = filialId ? (S.stockMap[filialId + '_' + p.id] || 0) : '';
     const row = [
       fmt(p.codproduto),
       fmt(p.descricao).replace(/,/g, ' '),
       fmt(p.ean),
+      fmt(p.referencia),
       fmt(p.departamentonivel1 || p.departamentonivel2 || ''),
+      fmt(p.marca),
       p.fornecedor || '',
       fmt(p.tipo),
+      fmt(p.ncm),
+      fmt(p.unidademedida),
+      p.peso || '',
+      fmt(p.origem),
       p.ativo === '0' ? 'Não' : 'Sim',
       found,
+      preco ? preco.precovenda : '',
+      preco ? preco.precocusto : '',
+      estoqueSistema,
       sales ? sales.total_qty : '',
       sales ? sales.total_value.toFixed(2) : '',
       sales && sales.last_sale_date ? new Date(sales.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR') : '',
+      sales ? sales.total_sales : '',
     ];
     if (isEncontrados) {
       const qtd = entry && entry.qtd != null ? entry.qtd : null;
-      const estoqueSistema = S.stockMap[viewSession.filialId + '_' + p.id] || 0;
       row.push(
         entry ? entry.scannedAt : '',
         qtd != null ? qtd : '',
-        estoqueSistema,
-        qtd != null ? qtd - estoqueSistema : '',
+        qtd != null ? qtd - (estoqueSistema || 0) : '',
       );
     }
     return row;
