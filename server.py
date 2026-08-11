@@ -4,7 +4,8 @@ import os
 import time
 import threading
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
@@ -1299,10 +1300,16 @@ def _run_vendas_full(data_de, data_ate):
     pedido ja vem da fase de listagem - dispensa uma chamada extra por pedido
     so pra descobrir a data (o que _run_vendas_2026 antigo fazia).
 
-    Reset do cache so acontece na primeira execucao (quando o meta.json ainda
-    nao existe), pra nao contar em dobro os produtos que ja tinham entrada em
-    SALES_CACHE_FILE vinda do metodo antigo (_fetch_sales_stats, historico
-    completo sem recorte de data). Em resumos seguintes (meta.json ja existe),
+    A listagem roda em TODA chamada (nao so na primeira) e so ACRESCENTA
+    pedidos novos ao meta existente - por isso a mesma funcao serve tanto
+    pro backfill historico (janela grande, uma vez) quanto pro job diario
+    (janela pequena, todo dia, sempre re-listando pra pegar pedidos novos).
+
+    Reset do cache so acontece na primeira execucao de todas (quando o
+    meta.json ainda nao existia em disco), pra nao contar em dobro os
+    produtos que ja tinham entrada em SALES_CACHE_FILE vinda do metodo antigo
+    (_fetch_sales_stats, historico completo sem recorte de data). Em toda
+    chamada seguinte (meta.json ja existe, mesmo que noutra janela de data),
     o cache e carregado normalmente e so recebe incrementos dos pedidos ainda
     nao processados - retomavel entre redeploys como as demais rotinas."""
     VENDAS_FULL_STATE["running"] = True
@@ -1315,24 +1322,27 @@ def _run_vendas_full(data_de, data_ate):
     try:
         meta = _load_json_file(VENDAS_FULL_META_FILE, None)
         primeira_execucao = meta is None
-        if primeira_execucao:
-            VENDAS_FULL_STATE["phase"] = "listando_pedidos"
+        if meta is None:
             meta = {}
-            page = 1
-            while True:
-                body = _fetch_pedidos_por_periodo_pagina(data_de, data_ate, page)
-                if not body.get("ok"):
-                    raise RuntimeError(f"falha ao listar pedidos pagina {page}: {body.get('error')}")
-                data = body.get("data", [])
-                for item in data:
-                    meta[str(item["id"])] = {"data": item.get("data"), "filial": item.get("filial_venda")}
-                total = body.get("total", 0)
-                VENDAS_FULL_STATE["processed"] = len(meta)
-                VENDAS_FULL_STATE["total"] = total
-                if len(meta) >= total or not data:
-                    break
-                page += 1
-            _save_json_file(VENDAS_FULL_META_FILE, meta)
+
+        VENDAS_FULL_STATE["phase"] = "listando_pedidos"
+        page = 1
+        encontrados_nesta_janela = 0
+        while True:
+            body = _fetch_pedidos_por_periodo_pagina(data_de, data_ate, page)
+            if not body.get("ok"):
+                raise RuntimeError(f"falha ao listar pedidos pagina {page}: {body.get('error')}")
+            data = body.get("data", [])
+            for item in data:
+                meta[str(item["id"])] = {"data": item.get("data"), "filial": item.get("filial_venda")}
+            encontrados_nesta_janela += len(data)
+            total = body.get("total", 0)
+            VENDAS_FULL_STATE["processed"] = encontrados_nesta_janela
+            VENDAS_FULL_STATE["total"] = total
+            if encontrados_nesta_janela >= total or not data:
+                break
+            page += 1
+        _save_json_file(VENDAS_FULL_META_FILE, meta)
 
         VENDAS_FULL_STATE["phase"] = "detalhando_pedidos"
         processados = set(_load_json_file(VENDAS_FULL_PROCESSADOS_FILE, []))
@@ -1423,6 +1433,89 @@ def admin_sales_full_start():
 def sales_full_status():
     total_produtos = len(_load_sales_cache())
     return jsonify({"ok": True, "state": VENDAS_FULL_STATE, "produtos_com_venda": total_produtos})
+
+
+DAILY_SYNC_STATE_FILE = os.path.join(DATA_DIR, "daily_sync_state.json")
+DAILY_SYNC_TZ = ZoneInfo("America/Sao_Paulo")
+DAILY_SYNC_HOUR = 23
+DAILY_SYNC_STATE = {"last_run_at": None, "last_covered_date": None, "last_error": None}
+
+
+def _run_daily_sync():
+    """Job diario (23:00 America/Sao_Paulo, ver _daily_scheduler_loop): puxa
+    produtos novos cadastrados (refresh_cache - resync completo do catalogo,
+    ja existente e usado manualmente via /api/cache/reload) e faz o backfill
+    incremental de vendas ate hoje, retomando de onde o ultimo dia coberto
+    parou (se o servidor ficou fora por alguns dias, cobre tudo de uma vez).
+
+    So avanca 'last_covered_date' se _run_vendas_full terminou sem erro -
+    numa falha (API fora, rate limit persistente), a mesma janela e
+    reprocessada no proximo disparo em vez de ser silenciosamente perdida."""
+    print("[daily-sync] iniciando sincronizacao diaria (produtos + vendas)...")
+    DAILY_SYNC_STATE["last_run_at"] = datetime.now().isoformat()
+    DAILY_SYNC_STATE["last_error"] = None
+
+    if not CACHE["loading"]:
+        threading.Thread(target=refresh_cache, daemon=True).start()
+    else:
+        print("[daily-sync] refresh de catalogo ja em andamento, nao disparei outro.")
+
+    with _vendas_full_lock:
+        if VENDAS_FULL_STATE["running"]:
+            print("[daily-sync] backfill de vendas ja rodando (outra chamada) - pulando, sera coberto no proximo disparo.")
+            return
+        hoje = date.today()
+        estado = _load_json_file(DAILY_SYNC_STATE_FILE, {})
+        ultima_coberta = estado.get("ultima_data_coberta")
+        if ultima_coberta:
+            data_de = (date.fromisoformat(ultima_coberta) + timedelta(days=1)).isoformat()
+        else:
+            data_de = (hoje - timedelta(days=1)).isoformat()
+        data_ate = hoje.isoformat()
+        if data_de > data_ate:
+            data_de = data_ate
+
+        def _worker():
+            _run_vendas_full(data_de, data_ate)
+            if VENDAS_FULL_STATE.get("last_error"):
+                DAILY_SYNC_STATE["last_error"] = VENDAS_FULL_STATE["last_error"]
+                print(f"[daily-sync] backfill de vendas falhou: {VENDAS_FULL_STATE['last_error']} - tenta de novo no proximo disparo.")
+            else:
+                _save_json_file(DAILY_SYNC_STATE_FILE, {"ultima_data_coberta": data_ate})
+                DAILY_SYNC_STATE["last_covered_date"] = data_ate
+                print(f"[daily-sync] vendas atualizadas ate {data_ate}.")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+
+def _daily_scheduler_loop():
+    """Dorme at o proximo 23:00 (America/Sao_Paulo) e dispara _run_daily_sync,
+    em loop indefinido. Usa zoneinfo em vez do horario local do container
+    (que normalmente roda em UTC no Docker) pra nao depender de TZ configurada
+    na infra."""
+    while True:
+        now = datetime.now(DAILY_SYNC_TZ)
+        target = now.replace(hour=DAILY_SYNC_HOUR, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        time.sleep((target - now).total_seconds())
+        try:
+            _run_daily_sync()
+        except Exception as exc:
+            DAILY_SYNC_STATE["last_error"] = str(exc)
+            print(f"[daily-sync] erro ao disparar job diario: {exc}")
+
+
+@app.route("/api/daily-sync/status")
+def daily_sync_status():
+    now = datetime.now(DAILY_SYNC_TZ)
+    next_run = now.replace(hour=DAILY_SYNC_HOUR, minute=0, second=0, microsecond=0)
+    if next_run <= now:
+        next_run += timedelta(days=1)
+    estado = _load_json_file(DAILY_SYNC_STATE_FILE, {})
+    return jsonify({"ok": True, "state": DAILY_SYNC_STATE,
+                    "ultima_data_coberta": estado.get("ultima_data_coberta"),
+                    "proximo_disparo": next_run.isoformat()})
 
 
 LAST_SALE_FILE = os.path.join(DATA_DIR, "last_sale_por_produto.json")
@@ -1547,4 +1640,5 @@ if __name__ == "__main__":
         _save_cache_to_disk()
     else:
         threading.Thread(target=refresh_cache, daemon=True).start()
+    threading.Thread(target=_daily_scheduler_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False)
