@@ -959,12 +959,26 @@ def _fetch_sales_stats(idproduto):
     return stats
 
 
+def _com_dias_sem_vender(stats):
+    """days_without_sale persistido fica velho com o tempo (calculado no dia
+    em que a linha foi escrita) - recalcula sempre a partir de last_sale_date
+    e da data de hoje, sem tocar no arquivo em disco."""
+    last_sale_date = stats.get("last_sale_date")
+    if not last_sale_date:
+        return stats
+    try:
+        last_dt = datetime.strptime(last_sale_date, "%Y-%m-%d").date()
+    except ValueError:
+        return stats
+    return {**stats, "days_without_sale": (date.today() - last_dt).days}
+
+
 @app.route("/api/sales/<int:idproduto>")
 def product_sales(idproduto):
     cache = _load_sales_cache()
     cached = cache.get(str(idproduto))
     if cached:
-        return jsonify({"ok": True, "stats": cached, "cached": True})
+        return jsonify({"ok": True, "stats": _com_dias_sem_vender(cached), "cached": True})
 
     stats = _fetch_sales_stats(idproduto)
     with _sales_cache_lock:
@@ -972,7 +986,7 @@ def product_sales(idproduto):
         cache[str(idproduto)] = stats
         _save_sales_cache(cache)
 
-    return jsonify({"ok": True, "stats": stats, "cached": False})
+    return jsonify({"ok": True, "stats": _com_dias_sem_vender(stats), "cached": False})
 
 
 def _fetch_pedidos_produtos_pagina(idproduto, page):
@@ -1260,6 +1274,157 @@ def sales_2026_full_status():
     return jsonify({"ok": True, "state": VENDAS_2026_FULL_STATE, "produtos_com_venda_2026": total_produtos})
 
 
+VENDAS_FULL_META_FILE = os.path.join(DATA_DIR, "vendas_full_pedidos_meta.json")
+VENDAS_FULL_PROCESSADOS_FILE = os.path.join(DATA_DIR, "vendas_full_processados.json")
+_vendas_full_lock = threading.Lock()
+VENDAS_FULL_STATE = {"running": False, "phase": None, "processed": 0, "total": 0,
+                     "data_inicio": None, "data_fim": None,
+                     "started_at": None, "finished_at": None, "last_error": None}
+
+
+def _fetch_pedidos_por_periodo_pagina(data_de, data_ate, page):
+    return _get_com_retry("pedidos", {"data_de": data_de, "data_ate": data_ate,
+                                       "page": page, "per_page": 200})
+
+
+def _run_vendas_full(data_de, data_ate):
+    """Backfill unico de vendas por produto, escrevendo direto em
+    SALES_CACHE_FILE - o mesmo arquivo que /api/sales-cache serve e que a aba
+    Relatorios de fato le (o antigo _run_vendas_2026_full grava num arquivo
+    separado, vendas_2026_catalogo.json, que nenhuma tela consome).
+
+    Mesma tecnica eficiente: lista pedidos por data (pedidos aceita data como
+    filtro minimo) capturando id+data+filial na mesma passada, depois abre
+    pedidos_produtos de cada pedido. Diferente da rotina antiga, a data do
+    pedido ja vem da fase de listagem - dispensa uma chamada extra por pedido
+    so pra descobrir a data (o que _run_vendas_2026 antigo fazia).
+
+    Reset do cache so acontece na primeira execucao (quando o meta.json ainda
+    nao existe), pra nao contar em dobro os produtos que ja tinham entrada em
+    SALES_CACHE_FILE vinda do metodo antigo (_fetch_sales_stats, historico
+    completo sem recorte de data). Em resumos seguintes (meta.json ja existe),
+    o cache e carregado normalmente e so recebe incrementos dos pedidos ainda
+    nao processados - retomavel entre redeploys como as demais rotinas."""
+    VENDAS_FULL_STATE["running"] = True
+    VENDAS_FULL_STATE["data_inicio"] = data_de
+    VENDAS_FULL_STATE["data_fim"] = data_ate
+    VENDAS_FULL_STATE["started_at"] = datetime.now().isoformat()
+    VENDAS_FULL_STATE["finished_at"] = None
+    VENDAS_FULL_STATE["last_error"] = None
+
+    try:
+        meta = _load_json_file(VENDAS_FULL_META_FILE, None)
+        primeira_execucao = meta is None
+        if primeira_execucao:
+            VENDAS_FULL_STATE["phase"] = "listando_pedidos"
+            meta = {}
+            page = 1
+            while True:
+                body = _fetch_pedidos_por_periodo_pagina(data_de, data_ate, page)
+                if not body.get("ok"):
+                    raise RuntimeError(f"falha ao listar pedidos pagina {page}: {body.get('error')}")
+                data = body.get("data", [])
+                for item in data:
+                    meta[str(item["id"])] = {"data": item.get("data"), "filial": item.get("filial_venda")}
+                total = body.get("total", 0)
+                VENDAS_FULL_STATE["processed"] = len(meta)
+                VENDAS_FULL_STATE["total"] = total
+                if len(meta) >= total or not data:
+                    break
+                page += 1
+            _save_json_file(VENDAS_FULL_META_FILE, meta)
+
+        VENDAS_FULL_STATE["phase"] = "detalhando_pedidos"
+        processados = set(_load_json_file(VENDAS_FULL_PROCESSADOS_FILE, []))
+        cache = {} if primeira_execucao else _load_sales_cache()
+        ids = list(meta.keys())
+        VENDAS_FULL_STATE["total"] = len(ids)
+        VENDAS_FULL_STATE["processed"] = len(processados)
+
+        for idpedido in ids:
+            if idpedido in processados:
+                continue
+
+            pedido_data = meta[idpedido].get("data")
+            pedido_filial = meta[idpedido].get("filial")
+
+            itens = []
+            page = 1
+            while True:
+                body = _fetch_pedidos_produtos_by_idpedido(int(idpedido), page)
+                if not body.get("ok"):
+                    break
+                data = body.get("data", [])
+                itens.extend(data)
+                total = body.get("total", 0)
+                if len(itens) >= total or not data:
+                    break
+                page += 1
+
+            for item in itens:
+                pid = str(item["idproduto"])
+                entry = cache.setdefault(pid, {
+                    "idproduto": int(pid), "total_sales": 0, "total_qty": 0, "total_value": 0.0,
+                    "last_sale_date": None, "first_sale_date": None, "days_without_sale": None,
+                    "sales_by_filial": {},
+                })
+                qtd = item.get("qtd") or 0
+                valor = item.get("valorvenda") or 0
+                entry["total_qty"] += qtd
+                entry["total_value"] += valor * qtd
+                entry["total_sales"] += 1
+                if pedido_data:
+                    if not entry["last_sale_date"] or pedido_data > entry["last_sale_date"]:
+                        entry["last_sale_date"] = pedido_data
+                    if not entry["first_sale_date"] or pedido_data < entry["first_sale_date"]:
+                        entry["first_sale_date"] = pedido_data
+                if pedido_filial is not None:
+                    fkey = str(pedido_filial)
+                    entry["sales_by_filial"][fkey] = entry["sales_by_filial"].get(fkey, 0) + qtd
+
+            processados.add(idpedido)
+            VENDAS_FULL_STATE["processed"] = len(processados)
+            if len(processados) % 50 == 0:
+                _save_sales_cache(cache)
+                _save_json_file(VENDAS_FULL_PROCESSADOS_FILE, list(processados))
+
+        _save_sales_cache(cache)
+        _save_json_file(VENDAS_FULL_PROCESSADOS_FILE, list(processados))
+    except Exception as exc:
+        VENDAS_FULL_STATE["last_error"] = str(exc)
+    finally:
+        VENDAS_FULL_STATE["running"] = False
+        VENDAS_FULL_STATE["finished_at"] = datetime.now().isoformat()
+
+
+@app.route("/api/admin/sales-full/start", methods=["POST"])
+def admin_sales_full_start():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+    data = request.get_json(silent=True) or {}
+    if not _admin_password_ok(data.get("adminPassword")):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    data_de = data.get("dataDe") or "2025-01-01"
+    data_ate = data.get("dataAte") or date.today().isoformat()
+
+    with _vendas_full_lock:
+        if VENDAS_FULL_STATE["running"]:
+            return jsonify({"ok": False, "error": "Calculo ja esta rodando."}), 409
+        threading.Thread(target=_run_vendas_full, args=(data_de, data_ate), daemon=True).start()
+    return jsonify({"ok": True, "message": f"Backfill de vendas ({data_de} a {data_ate}) iniciado em background."})
+
+
+@app.route("/api/sales-full/status")
+def sales_full_status():
+    total_produtos = len(_load_sales_cache())
+    return jsonify({"ok": True, "state": VENDAS_FULL_STATE, "produtos_com_venda": total_produtos})
+
+
 LAST_SALE_FILE = os.path.join(DATA_DIR, "last_sale_por_produto.json")
 LAST_SALE_PAGE_FILE = os.path.join(DATA_DIR, "last_sale_progress.json")
 _last_sale_lock = threading.Lock()
@@ -1359,7 +1524,8 @@ def last_sale_scan_status():
 
 @app.route("/api/sales-cache")
 def sales_cache_bulk():
-    return jsonify({"ok": True, "cache": _load_sales_cache()})
+    cache = _load_sales_cache()
+    return jsonify({"ok": True, "cache": {pid: _com_dias_sem_vender(s) for pid, s in cache.items()}})
 
 
 @app.route("/")
