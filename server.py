@@ -32,6 +32,18 @@ def _admin_password_ok(candidate):
     return hmac.compare_digest(str(candidate or "").encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
 
 
+# Chave separada da senha de admin - uso machine-to-machine (outro app
+# consumindo este como fonte de verdade), nao o painel humano. Ausente por
+# padrao (opcional) para nao quebrar ambientes que ainda nao configuraram.
+EXTERNAL_API_KEY = os.environ.get("EXTERNAL_API_KEY")
+
+
+def _external_api_key_ok(candidate):
+    if not EXTERNAL_API_KEY:
+        return False
+    return hmac.compare_digest(str(candidate or "").encode("utf-8"), EXTERNAL_API_KEY.encode("utf-8"))
+
+
 ADMIN_LOGIN_MAX_ATTEMPTS = 10
 ADMIN_LOGIN_WINDOW_SECONDS = 300
 _admin_login_attempts = {}
@@ -1547,6 +1559,81 @@ def daily_sync_status():
     return jsonify({"ok": True, "state": DAILY_SYNC_STATE,
                     "ultima_data_coberta": estado.get("ultima_data_coberta"),
                     "proximo_disparo": next_run.isoformat()})
+
+
+# ===== API EXTERNA (machine-to-machine, outro app usando este como fonte
+# de verdade) - autenticada por EXTERNAL_API_KEY, nao pela senha de admin. =====
+_external_api_attempts = {}
+
+
+def _merged_encontrados_por_filial(filial_id, sessions):
+    """Mesma logica de getMergedSessionForFilial no frontend: junta os
+    'encontrados' de todas as sessoes (todos os dias) daquela filial, em
+    ordem cronologica, para refletir tudo que ja foi confirmado como
+    existente na loja - nao so a sessao do dia atual."""
+    matches = sorted(
+        (s for s in sessions if s.get("filialId") == filial_id),
+        key=lambda s: (s.get("data") or "", s.get("inicio") or ""),
+    )
+    encontrados = {}
+    for s in matches:
+        encontrados.update(s.get("encontrados") or {})
+    return encontrados
+
+
+@app.route("/api/external/produtos-existentes")
+def external_produtos_existentes():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_external_api_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+    if not _external_api_key_ok(request.headers.get("X-API-Key")):
+        _record_failed_attempt(_external_api_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Chave de API invalida ou ausente (header X-API-Key)."}), 403
+    _external_api_attempts.pop(ip, None)
+
+    filial_id_param = request.args.get("filialId")
+    sessions = list(_load_audit().values())
+    produtos_map = {p["id"]: p for p in CACHE.get("produtos", [])}
+    filiais_map = {f["id"]: f for f in CACHE.get("filiais", [])}
+
+    if filial_id_param is not None:
+        try:
+            filial_ids = [int(filial_id_param)]
+        except ValueError:
+            return jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400
+    else:
+        filial_ids = sorted({s.get("filialId") for s in sessions if s.get("filialId") is not None})
+
+    produtos = []
+    for filial_id in filial_ids:
+        encontrados = _merged_encontrados_por_filial(filial_id, sessions)
+        filial = filiais_map.get(filial_id)
+        for pid_str, entry in encontrados.items():
+            produto = produtos_map.get(int(pid_str)) or {}
+            produtos.append({
+                "filialId": filial_id,
+                "filialNome": (filial.get("fantasia") or filial.get("razaosocial")) if filial else None,
+                "filialCodigo": filial.get("codigo") if filial else None,
+                "produtoId": int(pid_str),
+                "codproduto": produto.get("codproduto"),
+                "ean": entry.get("ean") or produto.get("ean"),
+                "descricao": entry.get("descricao") or produto.get("descricao"),
+                "referencia": produto.get("referencia"),
+                "ncm": produto.get("ncm"),
+                "unidademedida": produto.get("unidademedida"),
+                "fornecedor": produto.get("fornecedor"),
+                "categoria": produto.get("categoria"),
+                "subcategoria": produto.get("subcategoria"),
+                "departamentonivel1": produto.get("departamentonivel1"),
+                "departamentonivel2": produto.get("departamentonivel2"),
+                "marca": produto.get("marca"),
+                "ativo": produto.get("ativo"),
+                "scannedAt": entry.get("scannedAt"),
+                "qtdContada": entry.get("qtd"),
+            })
+
+    return jsonify({"ok": True, "total": len(produtos), "produtos": produtos})
 
 
 LAST_SALE_FILE = os.path.join(DATA_DIR, "last_sale_por_produto.json")
