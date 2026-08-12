@@ -1,9 +1,11 @@
+import collections
 import hmac
 import json
 import os
 import time
 import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
@@ -71,17 +73,33 @@ HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
 }
 
-_last_request_time = 0
-_MIN_INTERVAL = 3.0
+# Limite documentado da API: 30 requisicoes/minuto por credencial. O limitador
+# antigo (sleep fixo de 3s entre chamadas, sem lock) so dava ~20/min e nao era
+# thread-safe sob concorrencia - varias threads lendo/escrevendo a mesma
+# variavel global sem protecao. Este e um limitador de janela deslizante
+# (sliding window) com lock, compartilhado por todas as threads: cada uma
+# registra seu timestamp e, se a janela dos ultimos 60s ja tiver
+# _RATE_LIMIT_MAX chamadas, dorme (fora do lock, pra nao bloquear as outras)
+# so o tempo necessario. Isso permite varios workers em paralelo sem
+# ultrapassar o teto real da API - mais rapido que o antigo, mas nunca acima
+# do que a i9logic realmente permite.
+_RATE_LIMIT_MAX = 28
+_RATE_LIMIT_WINDOW = 60.0
+_rate_limit_lock = threading.Lock()
+_rate_limit_timestamps = collections.deque()
 
 
 def _rate_limit():
-    global _last_request_time
-    now = time.time()
-    wait = _last_request_time + _MIN_INTERVAL - now
-    if wait > 0:
-        time.sleep(wait)
-    _last_request_time = time.time()
+    while True:
+        with _rate_limit_lock:
+            now = time.time()
+            while _rate_limit_timestamps and now - _rate_limit_timestamps[0] > _RATE_LIMIT_WINDOW:
+                _rate_limit_timestamps.popleft()
+            if len(_rate_limit_timestamps) < _RATE_LIMIT_MAX:
+                _rate_limit_timestamps.append(now)
+                return
+            wait = _RATE_LIMIT_WINDOW - (now - _rate_limit_timestamps[0]) + 0.05
+        time.sleep(max(wait, 0.05))
 
 
 def _get_com_retry(path, params):
@@ -1288,6 +1306,26 @@ def _fetch_pedidos_por_periodo_pagina(data_de, data_ate, page):
                                        "page": page, "per_page": 200})
 
 
+def _detalhar_pedido(idpedido):
+    """Busca todos os itens (pedidos_produtos) de um pedido. Chamada em
+    paralelo por varios workers em _run_vendas_full - so faz I/O de rede
+    (protegido pelo _rate_limit compartilhado), nao toca em nenhum estado
+    mutavel compartilhado, entao e segura pra correr concorrentemente."""
+    itens = []
+    page = 1
+    while True:
+        body = _fetch_pedidos_produtos_by_idpedido(int(idpedido), page)
+        if not body.get("ok"):
+            break
+        data = body.get("data", [])
+        itens.extend(data)
+        total = body.get("total", 0)
+        if len(itens) >= total or not data:
+            break
+        page += 1
+    return idpedido, itens
+
+
 def _run_vendas_full(data_de, data_ate):
     """Backfill unico de vendas por produto, escrevendo direto em
     SALES_CACHE_FILE - o mesmo arquivo que /api/sales-cache serve e que a aba
@@ -1348,55 +1386,48 @@ def _run_vendas_full(data_de, data_ate):
         processados = set(_load_json_file(VENDAS_FULL_PROCESSADOS_FILE, []))
         cache = {} if primeira_execucao else _load_sales_cache()
         ids = list(meta.keys())
+        pendentes = [i for i in ids if i not in processados]
         VENDAS_FULL_STATE["total"] = len(ids)
         VENDAS_FULL_STATE["processed"] = len(processados)
 
-        for idpedido in ids:
-            if idpedido in processados:
-                continue
+        # O teto real e o rate limit da API (30/min, ver _rate_limit), nao o
+        # numero de workers - varias threads em paralelo aqui so garantem que
+        # a espera de rede de uma chamada nao atrase o cronometro da proxima,
+        # o suficiente pra de fato saturar os 28/min permitidos em vez dos
+        # ~20/min do limitador antigo (sleep fixo single-thread).
+        DETALHE_WORKERS = 6
 
-            pedido_data = meta[idpedido].get("data")
-            pedido_filial = meta[idpedido].get("filial")
+        with ThreadPoolExecutor(max_workers=DETALHE_WORKERS) as pool:
+            for idpedido, itens in pool.map(_detalhar_pedido, pendentes):
+                pedido_data = meta[idpedido].get("data")
+                pedido_filial = meta[idpedido].get("filial")
 
-            itens = []
-            page = 1
-            while True:
-                body = _fetch_pedidos_produtos_by_idpedido(int(idpedido), page)
-                if not body.get("ok"):
-                    break
-                data = body.get("data", [])
-                itens.extend(data)
-                total = body.get("total", 0)
-                if len(itens) >= total or not data:
-                    break
-                page += 1
+                for item in itens:
+                    pid = str(item["idproduto"])
+                    entry = cache.setdefault(pid, {
+                        "idproduto": int(pid), "total_sales": 0, "total_qty": 0, "total_value": 0.0,
+                        "last_sale_date": None, "first_sale_date": None, "days_without_sale": None,
+                        "sales_by_filial": {},
+                    })
+                    qtd = item.get("qtd") or 0
+                    valor = item.get("valorvenda") or 0
+                    entry["total_qty"] += qtd
+                    entry["total_value"] += valor * qtd
+                    entry["total_sales"] += 1
+                    if pedido_data:
+                        if not entry["last_sale_date"] or pedido_data > entry["last_sale_date"]:
+                            entry["last_sale_date"] = pedido_data
+                        if not entry["first_sale_date"] or pedido_data < entry["first_sale_date"]:
+                            entry["first_sale_date"] = pedido_data
+                    if pedido_filial is not None:
+                        fkey = str(pedido_filial)
+                        entry["sales_by_filial"][fkey] = entry["sales_by_filial"].get(fkey, 0) + qtd
 
-            for item in itens:
-                pid = str(item["idproduto"])
-                entry = cache.setdefault(pid, {
-                    "idproduto": int(pid), "total_sales": 0, "total_qty": 0, "total_value": 0.0,
-                    "last_sale_date": None, "first_sale_date": None, "days_without_sale": None,
-                    "sales_by_filial": {},
-                })
-                qtd = item.get("qtd") or 0
-                valor = item.get("valorvenda") or 0
-                entry["total_qty"] += qtd
-                entry["total_value"] += valor * qtd
-                entry["total_sales"] += 1
-                if pedido_data:
-                    if not entry["last_sale_date"] or pedido_data > entry["last_sale_date"]:
-                        entry["last_sale_date"] = pedido_data
-                    if not entry["first_sale_date"] or pedido_data < entry["first_sale_date"]:
-                        entry["first_sale_date"] = pedido_data
-                if pedido_filial is not None:
-                    fkey = str(pedido_filial)
-                    entry["sales_by_filial"][fkey] = entry["sales_by_filial"].get(fkey, 0) + qtd
-
-            processados.add(idpedido)
-            VENDAS_FULL_STATE["processed"] = len(processados)
-            if len(processados) % 50 == 0:
-                _save_sales_cache(cache)
-                _save_json_file(VENDAS_FULL_PROCESSADOS_FILE, list(processados))
+                processados.add(idpedido)
+                VENDAS_FULL_STATE["processed"] = len(processados)
+                if len(processados) % 50 == 0:
+                    _save_sales_cache(cache)
+                    _save_json_file(VENDAS_FULL_PROCESSADOS_FILE, list(processados))
 
         _save_sales_cache(cache)
         _save_json_file(VENDAS_FULL_PROCESSADOS_FILE, list(processados))
