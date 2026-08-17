@@ -1618,6 +1618,15 @@ function showClassReport(className) {
 }
 
 /* ===== EXPORT ===== */
+// Formata numero com virgula decimal (padrao BR) em vez do ponto do JS -
+// o Excel em pt-BR usa ponto-e-virgula como separador de coluna e virgula
+// como decimal; misturar os dois estilos e a causa mais comum de CSV
+// "vindo bagunçado" no Excel.
+function fmtNumeroBR(n, casas = 2) {
+  if (n == null || n === '') return '';
+  return Number(n).toFixed(casas).replace('.', ',');
+}
+
 function exportCSV() {
   const viewSession = currentViewSession();
   const isEncontrados = currentReport === 'encontrados' && viewSession;
@@ -1629,7 +1638,10 @@ function exportCSV() {
     'Qtd Vendida', 'Valor Vendido', 'Data Última Venda', 'Nº de Vendas',
   ];
   if (isEncontrados) headers.push('Horário 1º Bipe', 'Qtd Contada', 'Diferença');
-  const rows = reportData.map(p => {
+  // Exportação sempre ordenada por última venda (mais recente primeiro),
+  // independente do que estiver selecionado na tela no momento do clique.
+  const dadosOrdenados = reportData.slice().sort(REPORT_SORT_COLS.ultimaVenda.desc);
+  const rows = dadosOrdenados.map(p => {
     const entry = viewSession ? viewSession.encontrados[p.id] : null;
     const found = entry ? 'Sim' : 'Não';
     const sales = S.salesCache[p.id];
@@ -1637,7 +1649,7 @@ function exportCSV() {
     const estoqueSistema = filialId ? (S.stockMap[filialId + '_' + p.id] || 0) : '';
     const row = [
       fmt(p.codproduto),
-      fmt(p.descricao).replace(/,/g, ' '),
+      fmt(p.descricao),
       fmt(p.ean),
       fmt(p.referencia),
       fmt(p.departamentonivel1 || p.departamentonivel2 || ''),
@@ -1650,11 +1662,11 @@ function exportCSV() {
       fmt(p.origem),
       p.ativo === '0' ? 'Não' : 'Sim',
       found,
-      preco ? preco.precovenda : '',
-      preco ? preco.precocusto : '',
+      preco ? fmtNumeroBR(preco.precovenda) : '',
+      preco ? fmtNumeroBR(preco.precocusto) : '',
       estoqueSistema,
       sales ? sales.total_qty : '',
-      sales ? sales.total_value.toFixed(2) : '',
+      sales ? fmtNumeroBR(sales.total_value) : '',
       sales && sales.last_sale_date ? new Date(sales.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR') : '',
       sales ? sales.total_sales : '',
     ];
@@ -1668,7 +1680,12 @@ function exportCSV() {
     }
     return row;
   });
-  const csv = [headers, ...rows].map(r => r.map(v => '"' + (v || '') + '"').join(',')).join('\n');
+  // Separador ";" porque o Excel em pt-BR trata "," como decimal e usa ";"
+  // pra separar colunas - exportar com "," faz o Excel jogar a linha
+  // inteira numa unica celula ("vem tudo bagunçado"). Aspas internas sao
+  // escapadas dobrando ("" em vez de "), padrao RFC4180.
+  const csvEscape = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const csv = [headers, ...rows].map(r => r.map(csvEscape).join(';')).join('\r\n');
   const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
