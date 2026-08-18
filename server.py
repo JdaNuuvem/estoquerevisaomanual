@@ -1323,6 +1323,7 @@ def sales_2026_full_status():
 
 
 VENDAS_FULL_META_FILE = os.path.join(DATA_DIR, "vendas_full_pedidos_meta.json")
+VENDAS_FULL_LISTAGEM_PROGRESSO_FILE = os.path.join(DATA_DIR, "vendas_full_listagem_progresso.json")
 VENDAS_FULL_PROCESSADOS_FILE = os.path.join(DATA_DIR, "vendas_full_processados.json")
 _vendas_full_lock = threading.Lock()
 VENDAS_FULL_STATE = {"running": False, "phase": None, "processed": 0, "total": 0,
@@ -1393,8 +1394,18 @@ def _run_vendas_full(data_de, data_ate):
             meta = {}
 
         VENDAS_FULL_STATE["phase"] = "listando_pedidos"
-        page = 1
-        encontrados_nesta_janela = 0
+        # Retoma a listagem da pagina onde parou (mesma janela de datas) em
+        # vez de sempre recomecar em page=1 - sem isso, qualquer redeploy ou
+        # erro de rede no MEIO da listagem (que pode ter dezenas de milhares
+        # de pedidos - meses inteiros) perdia todo aquele progresso, porque
+        # antes so salvava o meta.json inteiro no final do loop.
+        progresso_listagem = _load_json_file(VENDAS_FULL_LISTAGEM_PROGRESSO_FILE, {})
+        if progresso_listagem.get("data_de") == data_de and progresso_listagem.get("data_ate") == data_ate:
+            page = progresso_listagem.get("next_page", 1)
+            encontrados_nesta_janela = progresso_listagem.get("encontrados", 0)
+        else:
+            page = 1
+            encontrados_nesta_janela = 0
         while True:
             body = _fetch_pedidos_por_periodo_pagina(data_de, data_ate, page)
             if not body.get("ok"):
@@ -1409,7 +1420,14 @@ def _run_vendas_full(data_de, data_ate):
             if encontrados_nesta_janela >= total or not data:
                 break
             page += 1
+            if page % 10 == 0:
+                _save_json_file(VENDAS_FULL_META_FILE, meta)
+                _save_json_file(VENDAS_FULL_LISTAGEM_PROGRESSO_FILE, {
+                    "data_de": data_de, "data_ate": data_ate,
+                    "next_page": page, "encontrados": encontrados_nesta_janela,
+                })
         _save_json_file(VENDAS_FULL_META_FILE, meta)
+        _save_json_file(VENDAS_FULL_LISTAGEM_PROGRESSO_FILE, {})
 
         VENDAS_FULL_STATE["phase"] = "detalhando_pedidos"
         processados = set(_load_json_file(VENDAS_FULL_PROCESSADOS_FILE, []))
