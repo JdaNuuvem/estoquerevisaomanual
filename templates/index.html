@@ -260,6 +260,16 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         <label style="font-size:.75rem;display:flex;align-items:center;gap:4px;cursor:pointer">
           <input type="checkbox" id="report-show-inactive"> Inativos
         </label>
+        <select id="report-sort-select" style="max-width:220px">
+          <option value="">Ordenar por...</option>
+          <option value="descricao:asc">Descrição (A-Z)</option>
+          <option value="valorVendido:desc">Valor vendido (maior primeiro)</option>
+          <option value="valorVendido:asc">Valor vendido (menor primeiro)</option>
+          <option value="qtdVendida:desc">Quantidade vendida (maior primeiro)</option>
+          <option value="qtdVendida:asc">Quantidade vendida (menor primeiro)</option>
+          <option value="ultimaVenda:desc">Última venda (mais recente primeiro)</option>
+          <option value="ultimaVenda:asc">Última venda (mais antiga primeiro)</option>
+        </select>
         <button class="btn-s btn-sm" id="btn-export-csv">Exportar CSV</button>
       </div>
       <div style="overflow-x:auto"><table class="report-table" id="report-table"><thead></thead><tbody></tbody></table></div>
@@ -1515,6 +1525,17 @@ function setReportSort(col) {
   loadReport();
 }
 
+// Mesmo estado (reportSort) do clique no cabeçalho da coluna, mas via
+// dropdown explícito - existem os dois jeitos porque nem todo mundo percebe
+// que clicar no cabeçalho ordena. exportCSV usa reportData na ordem em que
+// já está (ver loadReport), então qualquer um dos dois controles também
+// decide a ordem do CSV exportado.
+function setReportSortFromSelect(value) {
+  if (!value) { reportSort = { col: null, dir: 'asc' }; }
+  else { const [col, dir] = value.split(':'); reportSort = { col, dir }; }
+  loadReport();
+}
+
 function renderReports() {
   let tabs = REPORT_DEFS.map(r => {
     const active = r.id === currentReport ? ' active' : '';
@@ -1561,6 +1582,9 @@ function loadReport() {
 }
 
 function renderReportPage() {
+  const sortSelect = $('#report-sort-select');
+  if (sortSelect) sortSelect.value = reportSort.col ? `${reportSort.col}:${reportSort.dir}` : '';
+
   const start = reportPage * REPORT_PAGE_SIZE;
   const page = reportData.slice(start, start + REPORT_PAGE_SIZE);
   const totalPages = Math.ceil(reportData.length / REPORT_PAGE_SIZE);
@@ -1638,10 +1662,10 @@ function exportCSV() {
     'Qtd Vendida', 'Valor Vendido', 'Data Última Venda', 'Nº de Vendas',
   ];
   if (isEncontrados) headers.push('Horário 1º Bipe', 'Qtd Contada', 'Diferença');
-  // Exportação sempre ordenada por última venda (mais recente primeiro),
-  // independente do que estiver selecionado na tela no momento do clique.
-  const dadosOrdenados = reportData.slice().sort(REPORT_SORT_COLS.ultimaVenda.desc);
-  const rows = dadosOrdenados.map(p => {
+  // reportData já está na ordem escolhida (dropdown "Ordenar por" ou clique
+  // no cabeçalho da coluna, os dois alimentam o mesmo reportSort em
+  // loadReport) - exportar respeita exatamente o que está na tela.
+  const rows = reportData.map(p => {
     const entry = viewSession ? viewSession.encontrados[p.id] : null;
     const found = entry ? 'Sim' : 'Não';
     const sales = S.salesCache[p.id];
@@ -2332,6 +2356,7 @@ async function init() {
   // Event: report filter
   $('#report-search').addEventListener('input', debounce(() => loadReport(), 400));
   $('#report-show-inactive').addEventListener('change', loadReport);
+  $('#report-sort-select').addEventListener('change', (e) => setReportSortFromSelect(e.target.value));
 
   // Event: export
   $('#btn-export-csv').addEventListener('click', exportCSV);
