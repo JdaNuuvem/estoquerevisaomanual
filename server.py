@@ -118,17 +118,34 @@ def _get_com_retry(path, params):
     """GET com o mesmo retry/backoff exponencial de _paginated_fetch (10
     tentativas, espera crescente ate 120s) para rotinas longas que rodam sem
     supervisao - sem isso, um unico RATE_LIMIT_EXCEEDED temporario derruba a
-    rotina inteira em vez de so esperar e continuar."""
+    rotina inteira em vez de so esperar e continuar.
+
+    Tambem cobre falha de rede (timeout, conexao recusada) e corpo de
+    resposta que nao decodifica como JSON (proxy retornando vazio/HTML em
+    vez do corpo esperado, por exemplo) - sem isso, uma unica oscilacao de
+    rede da i9logic no meio de um backfill de horas derrubava a rotina
+    inteira com "Expecting value: line 1 column 1", exigindo relancar na
+    mao. Ambas tratadas como falha transiente, mesmo backoff do rate limit."""
+    ultimo_erro = None
     for attempt in range(10):
         _rate_limit()
-        resp = requests.get(f"{API_BASE}/{path}", headers=HEADERS, params=params, timeout=45)
-        body = resp.json()
+        try:
+            resp = requests.get(f"{API_BASE}/{path}", headers=HEADERS, params=params, timeout=45)
+            body = resp.json()
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            ultimo_erro = exc
+            wait = min(30 * (2 ** attempt), 120)
+            print(f"[retry] falha de rede/decode em {path}, tentativa {attempt+1}/10, aguardando {wait}s... ({exc})")
+            time.sleep(wait)
+            continue
         if resp.status_code == 429 or (not body.get("ok") and "RATE_LIMIT" in str(body.get("error", ""))):
             wait = min(30 * (2 ** attempt), 120)
             print(f"[retry] rate-limit em {path}, tentativa {attempt+1}/10, aguardando {wait}s...")
             time.sleep(wait)
             continue
         return body
+    if ultimo_erro is not None:
+        return {"ok": False, "error": f"falha apos 10 tentativas: {ultimo_erro}"}
     return body
 
 
