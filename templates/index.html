@@ -86,6 +86,12 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
 #camera-modal .cam-controls{position:absolute;bottom:30px;left:50%;transform:translateX(-50%);display:flex;gap:12px}
 #camera-modal .close-btn{position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center}
 
+#foto-camera-modal{position:fixed;inset:0;background:#000;z-index:300;display:none;flex-direction:column}
+#foto-camera-modal.active{display:flex}
+#foto-camera-modal video,#foto-camera-modal img{flex:1;width:100%;object-fit:cover}
+#foto-camera-modal .cam-controls{position:absolute;bottom:30px;left:50%;transform:translateX(-50%);display:flex;gap:12px}
+#foto-camera-modal .close-btn{position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center}
+
 #contagem-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:300;display:none;align-items:center;justify-content:center;padding:16px}
 #contagem-modal.active{display:flex}
 #contagem-modal .qty-modal-content{background:var(--surface);border-radius:var(--radius);padding:24px;max-width:360px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.25)}
@@ -252,6 +258,53 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         </div>
       </div>
     </div>
+    <!-- FOTOGRAFO -->
+    <div id="fotografo-view" style="display:none">
+      <div style="padding:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <strong id="foto-progresso-texto">0 de 0 fotografados</strong>
+          <button class="btn-o btn-sm" id="btn-ja-fotografados">Já fotografados</button>
+        </div>
+        <div style="background:var(--surface-2);border-radius:8px;height:10px;overflow:hidden;margin-bottom:16px">
+          <div id="foto-progresso-barra" style="background:var(--p500);height:100%;width:0%;transition:width .3s"></div>
+        </div>
+        <div id="foto-produto-atual" class="card" style="text-align:center;padding:24px"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;justify-content:center">
+          <button class="btn-p" id="btn-abrir-camera-foto">Tirar Foto</button>
+          <button class="btn-o" id="btn-pular-produto">Pular</button>
+          <button class="btn-o" id="btn-ler-codigo-avulso">Ler Código de Barras</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="foto-camera-modal">
+      <video id="foto-camera-video" autoplay playsinline></video>
+      <canvas id="foto-canvas" style="display:none"></canvas>
+      <img id="foto-preview-img" style="display:none">
+      <button class="close-btn" id="btn-fechar-foto-camera">×</button>
+      <div class="cam-controls" id="foto-cam-controls-video">
+        <button class="btn-p" id="btn-capturar-foto">Capturar</button>
+      </div>
+      <div class="cam-controls" id="foto-cam-controls-preview" style="display:none">
+        <button class="btn-o" id="btn-repetir-foto">Repetir</button>
+        <button class="btn-p" id="btn-enviar-foto">Enviar</button>
+      </div>
+    </div>
+
+    <div id="foto-revisar-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:250;display:none;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto">
+      <div style="background:var(--surface);border-radius:var(--radius);padding:16px;max-width:600px;width:100%">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <strong>Já Fotografados</strong>
+          <button class="btn-o btn-sm" id="btn-fechar-revisar">Fechar</button>
+        </div>
+        <div id="foto-revisar-lista" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px"></div>
+      </div>
+    </div>
+
+    <div id="foto-scanner-modal" style="position:fixed;inset:0;background:#000;z-index:300;display:none;flex-direction:column">
+      <video id="foto-scanner-video" autoplay playsinline style="flex:1;width:100%;object-fit:cover"></video>
+      <button class="close-btn" id="btn-fechar-foto-scanner" style="position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center">×</button>
+    </div>
     <!-- REPORTS -->
     <div id="reports-view" style="display:none">
       <div class="report-tabs" id="report-tabs"></div>
@@ -294,17 +347,36 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
     <!-- BIPADORES (admin) -->
     <div id="bipadores-view" style="display:none">
       <div class="card" style="margin-bottom:16px">
-        <h3 style="margin-bottom:12px">Novo Bipador</h3>
+        <h3 style="margin-bottom:12px">Novo Usuário</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <input id="bip-name" placeholder="Nome completo" style="flex:1;min-width:150px">
           <input id="bip-email" type="email" placeholder="Email" style="flex:1;min-width:150px">
           <input id="bip-password" type="password" placeholder="Senha (min. 6 caracteres)" autocomplete="new-password" style="flex:1;min-width:150px">
           <select id="bip-filial" style="flex:1;min-width:150px"><option value="">Carregando lojas...</option></select>
+          <select id="bip-role" style="flex:1;min-width:150px">
+            <option value="bipador">Bipador</option>
+            <option value="fotografo">Fotógrafo</option>
+          </select>
           <button class="btn-s" id="btn-create-bipador">Cadastrar</button>
         </div>
         <div id="bip-error" style="color:var(--d600);font-size:.85rem;display:none;margin-top:8px"></div>
       </div>
       <div id="bipadores-list"></div>
+
+      <div class="card" style="margin-top:16px">
+        <h3 style="margin-bottom:12px">Fotografia por Loja</h3>
+        <div id="fotos-progresso-list"></div>
+      </div>
+
+      <div id="foto-galeria-admin-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:250;display:none;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto">
+        <div style="background:var(--surface);border-radius:var(--radius);padding:16px;max-width:700px;width:100%">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <strong id="foto-galeria-admin-titulo">Fotos</strong>
+            <button class="btn-o btn-sm" id="btn-fechar-galeria-admin">Fechar</button>
+          </div>
+          <div id="foto-galeria-admin-lista" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px"></div>
+        </div>
+      </div>
     </div>
     <div id="dedup-view" style="display:none">
       <div class="card" style="margin-bottom:16px">
@@ -390,6 +462,11 @@ let S = {
   cameraStream: null,
   cameraActive: false,
   barcodeDetector: null,
+  fotografoFila: [],
+  fotografoAtual: null,
+  fotografoEmRevisao: null,
+  fotoStream: null,
+  fotoBlobAtual: null,
 };
 
 /* ===== UTILITY ===== */
@@ -1805,7 +1882,7 @@ async function switchView(view) {
     }
   }
   else if (view === 'debug') { $('#debug-view').style.display = 'block'; pullSyncedProducts(); }
-  else if (view === 'bipadores') { $('#bipadores-view').style.display = 'block'; popAdminFilialSelect(); loadBipadoresList(); }
+  else if (view === 'bipadores') { $('#bipadores-view').style.display = 'block'; popAdminFilialSelect(); loadBipadoresList(); carregarProgressoFotosPorLoja(); }
   else if (view === 'dedup') { $('#dedup-view').style.display = 'block'; popDedupFilialSelect(); }
   else if (view === 'loading') { $('#loading-view').style.display = 'flex'; }
   $$('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
@@ -1929,6 +2006,7 @@ function updateNavForRole() {
   $$('nav button[data-view]').forEach(b => {
     const v = b.dataset.view;
     if (adminOnly.includes(v)) b.style.display = S.isAdmin ? '' : 'none';
+    else if (v === 'audit') b.style.display = (S.user && S.user.role === 'fotografo') ? 'none' : '';
   });
 }
 
@@ -2143,27 +2221,87 @@ async function loadBipadoresList() {
   }
 }
 
+async function carregarProgressoFotosPorLoja() {
+  const linhas = await Promise.all(S.filiais.map(async f => {
+    const r = await apiGet('fotografo/fila', { filialId: f.id, resumo: 1 });
+    return { filial: f, totalBipado: r.total_bipado || 0, totalFotografado: r.total_fotografado || 0 };
+  }));
+  $('#fotos-progresso-list').innerHTML = linhas.map(l => {
+    const pct = l.totalBipado > 0 ? Math.round((l.totalFotografado / l.totalBipado) * 100) : 0;
+    return `<div class="recent-row" style="cursor:default;flex-direction:column;align-items:stretch;gap:6px">
+      <div style="display:flex;justify-content:space-between">
+        <strong>${escapeHtml(l.filial.fantasia || l.filial.razaosocial)}</strong>
+        <span style="color:var(--muted);font-size:.8rem">${l.totalFotografado} de ${l.totalBipado} (${pct}%)</span>
+      </div>
+      <div style="background:var(--surface-2);border-radius:8px;height:8px;overflow:hidden">
+        <div style="background:var(--p500);height:100%;width:${pct}%"></div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn-o btn-sm" onclick="abrirGaleriaAdmin(${l.filial.id})">Ver fotos</button>
+        <button class="btn-s btn-sm" onclick="baixarZipFotos(${l.filial.id})">Baixar .zip</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function abrirGaleriaAdmin(filialId) {
+  const filial = S.filiais.find(f => f.id === filialId);
+  $('#foto-galeria-admin-titulo').textContent = 'Fotos — ' + (filial ? (filial.fantasia || filial.razaosocial) : filialId);
+  const r = await apiGet('fotografo/fotos', { filialId });
+  const fotos = r.fotos || [];
+  $('#foto-galeria-admin-lista').innerHTML = fotos.length
+    ? fotos.map(f => `<a href="${f.url}" target="_blank" rel="noopener noreferrer"><img src="${f.url}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px"></a>`).join('')
+    : '<div class="empty">Nenhuma foto ainda.</div>';
+  $('#foto-galeria-admin-modal').style.display = 'flex';
+}
+
+async function baixarZipFotos(filialId) {
+  try {
+    const resp = await fetch('/api/admin/fotos/zip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, filialId }),
+    });
+    if (!resp.ok) {
+      const r = await resp.json().catch(() => ({}));
+      toast('Erro ao baixar fotos: ' + (r.error || resp.status), 'err');
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `fotos_filial_${filialId}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    toast('Falha ao baixar fotos: sem conexão com o servidor.', 'err');
+  }
+}
+
 async function handleCreateBipador() {
   clearAuthErrors();
   const name = $('#bip-name').value.trim();
   const email = $('#bip-email').value.trim();
   const password = $('#bip-password').value;
   const filialId = Number($('#bip-filial').value);
+  const role = $('#bip-role').value;
   if (!name || !email || !password || !filialId) { showAuthError('bip', 'Preencha todos os campos.'); return; }
   if (password.length < 6) { showAuthError('bip', 'Senha deve ter pelo menos 6 caracteres.'); return; }
   try {
     const resp = await fetch('/api/admin/bipadores', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ adminPassword: S.adminPassword, name, email, password, filialId }),
+      body: JSON.stringify({ adminPassword: S.adminPassword, name, email, password, filialId, role }),
     });
     const r = await resp.json();
     if (!r.ok) { showAuthError('bip', r.error); return; }
-    toast('Bipador cadastrado!', 'ok');
+    toast('Usuário cadastrado!', 'ok');
     $('#bip-name').value = '';
     $('#bip-email').value = '';
     $('#bip-password').value = '';
     $('#bip-filial').value = '';
+    $('#bip-role').value = 'bipador';
     loadBipadoresList();
   } catch (e) {
     showAuthError('bip', 'Erro ao cadastrar bipador: sem conexão com o servidor.');
@@ -2207,17 +2345,241 @@ async function handleUpdateBipadorFilial(email, filialId) {
 function onAuthSuccess(user) {
   const filial = S.filiais.find(f => f.id === user.filialId);
   S.user = { ...user, filialNome: filial ? (filial.fantasia || filial.razaosocial) : 'Loja ' + user.filialId };
-  lsSet(LS_KEYS.state, { email: user.email, name: user.name, filialId: user.filialId });
-  startAuditInternal();
+  lsSet(LS_KEYS.state, { email: user.email, name: user.name, filialId: user.filialId, role: user.role });
+  if (S.user.role === 'fotografo') startFotografoInternal();
+  else startAuditInternal();
+}
+
+async function startFotografoInternal() {
+  $('#setup-modal').style.display = 'none';
+  $('#app').classList.add('active');
+  $$('nav button[data-view]').forEach(b => b.style.display = 'none');
+  ['dashboard-view', 'audit-view', 'reports-view', 'debug-view', 'bipadores-view', 'dedup-view'].forEach(id => $(`#${id}`).style.display = 'none');
+  $('#fotografo-view').style.display = 'block';
+  $('#hdr-filial').textContent = S.user.filialNome;
+  $('#hdr-auditor').textContent = S.user.name;
+  if (!S.dataReady) await loadAllData();
+  await loadFotografoFila();
+}
+
+async function loadFotografoFila() {
+  const r = await apiGet('fotografo/fila', { filialId: S.user.filialId });
+  S.fotografoFila = r.fila || [];
+  S.totalBipado = r.total_bipado || 0;
+  S.totalFotografado = r.total_fotografado || 0;
+  S.fotografoAtual = S.fotografoFila[0] || null;
+  renderFotografoAtual();
+}
+
+function renderFotografoAtual() {
+  $('#foto-progresso-texto').textContent = `${S.totalFotografado} de ${S.totalBipado} fotografados`;
+  const pct = S.totalBipado > 0 ? Math.round((S.totalFotografado / S.totalBipado) * 100) : 0;
+  $('#foto-progresso-barra').style.width = pct + '%';
+
+  const el = $('#foto-produto-atual');
+  if (!S.fotografoAtual) {
+    el.innerHTML = '<strong>Loja concluída!</strong><p style="color:var(--muted);margin-top:8px">Todos os produtos bipados já foram fotografados.</p>';
+    $('#btn-abrir-camera-foto').disabled = true;
+    $('#btn-pular-produto').disabled = true;
+    return;
+  }
+  $('#btn-abrir-camera-foto').disabled = false;
+  $('#btn-pular-produto').disabled = false;
+  const p = S.fotografoAtual;
+  el.innerHTML = `<strong style="font-size:1.1rem">${escapeHtml(p.descricao)}</strong>
+    <div style="color:var(--muted);font-size:.85rem;margin-top:4px">SKU: ${escapeHtml(p.codproduto || '-')} | EAN: ${escapeHtml(p.ean || '-')}</div>`;
+}
+
+async function startFotoCamera() {
+  try {
+    S.fotoStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 } },
+      audio: false,
+    });
+    $('#foto-camera-video').srcObject = S.fotoStream;
+    $('#foto-camera-video').style.display = 'block';
+    $('#foto-preview-img').style.display = 'none';
+    $('#foto-cam-controls-video').style.display = 'flex';
+    $('#foto-cam-controls-preview').style.display = 'none';
+    $('#foto-camera-modal').classList.add('active');
+  } catch (e) {
+    toast('Erro ao acessar câmera: ' + e.message, 'err');
+  }
+}
+
+function stopFotoCamera() {
+  if (S.fotoStream) {
+    S.fotoStream.getTracks().forEach(t => t.stop());
+    S.fotoStream = null;
+  }
+  $('#foto-camera-modal').classList.remove('active');
+  S.fotoBlobAtual = null;
+}
+
+function capturarFoto() {
+  const video = $('#foto-camera-video');
+  const canvas = $('#foto-canvas');
+  const maxLado = 1600;
+  const escala = Math.min(1, maxLado / Math.max(video.videoWidth, video.videoHeight));
+  canvas.width = video.videoWidth * escala;
+  canvas.height = video.videoHeight * escala;
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob((blob) => {
+    S.fotoBlobAtual = blob;
+    $('#foto-preview-img').src = URL.createObjectURL(blob);
+    $('#foto-camera-video').style.display = 'none';
+    $('#foto-preview-img').style.display = 'block';
+    $('#foto-cam-controls-video').style.display = 'none';
+    $('#foto-cam-controls-preview').style.display = 'flex';
+  }, 'image/jpeg', 0.85);
+}
+
+function repetirFoto() {
+  S.fotoBlobAtual = null;
+  $('#foto-camera-video').style.display = 'block';
+  $('#foto-preview-img').style.display = 'none';
+  $('#foto-cam-controls-video').style.display = 'flex';
+  $('#foto-cam-controls-preview').style.display = 'none';
+}
+
+async function enviarFotoAtual() {
+  const produto = S.fotografoEmRevisao || S.fotografoAtual;
+  if (!S.fotoBlobAtual || !produto) return;
+  const form = new FormData();
+  form.append('filialId', S.user.filialId);
+  form.append('produtoId', produto.id);
+  form.append('fotografoEmail', S.user.email);
+  form.append('foto', S.fotoBlobAtual, 'foto.jpg');
+  try {
+    const resp = await fetch('/api/fotografo/foto', { method: 'POST', body: form });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro ao enviar foto: ' + r.error, 'err'); return; }
+    toast('Foto enviada!', 'ok');
+    stopFotoCamera();
+    if (S.fotografoEmRevisao) {
+      S.fotografoEmRevisao = null;
+      toast('Foto atualizada!', 'ok');
+    } else {
+      S.fotografoFila = S.fotografoFila.filter(p => p.id !== produto.id);
+      S.totalFotografado += 1;
+      S.fotografoAtual = S.fotografoFila[0] || null;
+      renderFotografoAtual();
+    }
+  } catch (e) {
+    toast('Falha ao enviar foto: sem conexão com o servidor.', 'err');
+  }
+}
+
+async function abrirJaFotografados() {
+  const r = await apiGet('fotografo/fotos', { filialId: S.user.filialId });
+  const fotos = r.fotos || [];
+  $('#foto-revisar-lista').innerHTML = fotos.length
+    ? fotos.map(f => `
+      <div style="cursor:pointer;text-align:center" onclick="reFotografarProduto(${f.produtoId})">
+        <img src="${f.url}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px">
+        <div style="font-size:.7rem;color:var(--muted);margin-top:2px">#${f.produtoId}</div>
+      </div>
+    `).join('')
+    : '<div class="empty">Nenhuma foto enviada ainda.</div>';
+  $('#foto-revisar-modal').style.display = 'flex';
+}
+
+function reFotografarProduto(produtoId) {
+  const produto = S.productsMap[produtoId];
+  if (!produto) return;
+  S.fotografoEmRevisao = produto;
+  $('#foto-revisar-modal').style.display = 'none';
+  startFotoCamera();
+}
+
+function pularProdutoFotografo() {
+  if (!S.fotografoAtual) return;
+  const pulado = S.fotografoFila.shift();
+  S.fotografoFila.push(pulado);
+  S.fotografoAtual = S.fotografoFila[0] || null;
+  renderFotografoAtual();
+}
+
+let fotoScannerStream = null;
+let fotoScannerAtivo = false;
+
+async function abrirLeitorAvulso() {
+  if (!S.barcodeDetector) { toast('Leitor de código de barras não disponível neste navegador.', 'err'); return; }
+  try {
+    fotoScannerStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false,
+    });
+    const video = $('#foto-scanner-video');
+    video.srcObject = fotoScannerStream;
+    $('#foto-scanner-modal').style.display = 'flex';
+    fotoScannerAtivo = true;
+    fotoScannerLoop(video);
+  } catch (e) {
+    toast('Erro ao acessar câmera: ' + e.message, 'err');
+  }
+}
+
+function fecharLeitorAvulso() {
+  fotoScannerAtivo = false;
+  if (fotoScannerStream) {
+    fotoScannerStream.getTracks().forEach(t => t.stop());
+    fotoScannerStream = null;
+  }
+  $('#foto-scanner-video').srcObject = null;
+  $('#foto-scanner-modal').style.display = 'none';
+}
+
+function fotoScannerLoop(video) {
+  (async function loop() {
+    if (!fotoScannerAtivo) return;
+    try {
+      const barcodes = await S.barcodeDetector.detect(video);
+      if (barcodes.length > 0) {
+        fecharLeitorAvulso();
+        pularParaProdutoAvulso(barcodes[0].rawValue);
+        return;
+      }
+    } catch {}
+    requestAnimationFrame(() => fotoScannerLoop(video));
+  })();
+}
+
+async function pularParaProdutoAvulso(codigo) {
+  const matches = findByEanOuCodigo(codigo);
+  if (!matches || matches.length === 0) {
+    toast('❌ CÓDIGO NÃO ENCONTRADO NO CATÁLOGO', 'err');
+    return;
+  }
+  const produtoId = matches[0].id;
+  const idx = S.fotografoFila.findIndex(p => p.id === produtoId);
+  if (idx !== -1) {
+    const [produto] = S.fotografoFila.splice(idx, 1);
+    S.fotografoFila.unshift(produto);
+    S.fotografoAtual = produto;
+    renderFotografoAtual();
+    toast(`Pulou para: ${produto.descricao}`, 'ok');
+    return;
+  }
+  // Nao esta na fila (sem foto) - checa se ja foi fotografado, pra permitir refotografar.
+  try {
+    const r = await apiGet('fotografo/fotos', { filialId: S.user.filialId });
+    const fotos = r.fotos || [];
+    if (fotos.some(f => f.produtoId === produtoId)) {
+      reFotografarProduto(produtoId);
+      return;
+    }
+  } catch (e) {}
+  toast('Este produto ainda não foi bipado nesta loja.', 'warn');
 }
 
 function autoLoginIfSessionSaved() {
   const prevState = lsGet(LS_KEYS.state);
   if (prevState && prevState.email) {
-    S.user = { name: prevState.name, email: prevState.email, filialId: prevState.filialId, filialNome: '' };
+    S.user = { name: prevState.name, email: prevState.email, filialId: prevState.filialId, role: prevState.role, filialNome: '' };
     const filial = S.filiais.find(f => f.id === prevState.filialId);
     if (filial) S.user.filialNome = filial.fantasia || filial.razaocial;
-    if (S.dataReady) startAuditInternal();
+    if (S.user.role === 'fotografo') startFotografoInternal();
+    else if (S.dataReady) startAuditInternal();
   }
 }
 
@@ -2235,6 +2597,9 @@ function handleLogout() {
   $('#hdr-filial-select').style.display = 'none';
   lsSet(LS_KEYS.state, null);
   if (S.cameraStream) stopCamera();
+  if (S.fotoStream) stopFotoCamera();
+  fecharLeitorAvulso();
+  $('#fotografo-view').style.display = 'none';
   $('#admin-password').value = '';
   $('#auth-admin').style.display = 'none';
   $('#auth-login').style.display = 'flex';
@@ -2407,6 +2772,7 @@ async function init() {
   $('#btn-export-csv').addEventListener('click', exportCSV);
   $('#btn-dedup-analyze').addEventListener('click', handleAnalyzeDuplicates);
   $('#btn-dedup-export').addEventListener('click', exportDedupCSV);
+  $('#btn-fechar-galeria-admin').addEventListener('click', () => $('#foto-galeria-admin-modal').style.display = 'none');
   $('#dedup-filial').addEventListener('change', () => {
     resetDedupState();
     const filialId = Number($('#dedup-filial').value);
@@ -2434,6 +2800,18 @@ async function init() {
       toast('Busque um produto sem código de barras primeiro.', 'warn');
     }
   });
+
+  // Event: fotografo
+  $('#btn-abrir-camera-foto').addEventListener('click', startFotoCamera);
+  $('#btn-fechar-foto-camera').addEventListener('click', stopFotoCamera);
+  $('#btn-capturar-foto').addEventListener('click', capturarFoto);
+  $('#btn-repetir-foto').addEventListener('click', repetirFoto);
+  $('#btn-enviar-foto').addEventListener('click', enviarFotoAtual);
+  $('#btn-pular-produto').addEventListener('click', pularProdutoFotografo);
+  $('#btn-ler-codigo-avulso').addEventListener('click', abrirLeitorAvulso);
+  $('#btn-ja-fotografados').addEventListener('click', abrirJaFotografados);
+  $('#btn-fechar-revisar').addEventListener('click', () => $('#foto-revisar-modal').style.display = 'none');
+  $('#btn-fechar-foto-scanner').addEventListener('click', fecharLeitorAvulso);
 
   initScannerInput();
 }
