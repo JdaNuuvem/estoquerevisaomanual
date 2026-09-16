@@ -388,7 +388,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
     <div id="fotos-view" style="display:none">
       <div class="card" style="margin-bottom:16px">
         <h3 style="margin-bottom:8px">Automação de imagens · Status Cosméticos</h3>
-        <p style="color:var(--muted);font-size:.85rem;margin-bottom:10px">Procura por EAN exato no Mercado Livre quando houver token configurado e em bases públicas. Os resultados ficam para sua revisão.</p>
+        <p style="color:var(--muted);font-size:.85rem;margin-bottom:10px">Procura primeiro pelo nome do produto e usa o EAN como confirmação complementar. Pode trazer mais de uma opção; escolha a embalagem correta antes de salvar.</p>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select id="midia-auto-limite" style="max-width:170px"><option value="20">Lote de 20</option><option value="50" selected>Lote de 50</option><option value="100">Lote de 100</option><option value="500">Lote de 500</option></select>
           <button class="btn-p" id="btn-iniciar-midia-auto">Iniciar busca automática</button>
@@ -2455,7 +2455,8 @@ async function carregarAutomacaoMidia() {
         <img src="${escapeHtml(c.url)}" loading="lazy" style="width:100%;height:100px;object-fit:contain">
         </a>
         <div style="font-size:.72rem;color:var(--text)">${escapeHtml(c.descricao || '')}</div>
-        <div style="font-size:.68rem;color:var(--muted)">${escapeHtml(c.fonte || '')} · ${escapeHtml(c.ean || '')}</div>
+        <div style="font-size:.68rem;color:var(--muted)">${escapeHtml(c.fonte || '')} · confiança ${escapeHtml(c.confianca || 'n/d')} · ${escapeHtml(c.ean || '')}</div>
+        ${c.contexto ? `<div style="font-size:.68rem;color:var(--muted);margin-top:2px">${escapeHtml(c.contexto)}</div>` : ''}
         <button class="btn-s btn-sm" style="width:100%;margin-top:5px" onclick="aprovarMidiaAdmin(${Number(c.produtoId)},decodeURIComponent('${encodeURIComponent(c.url).replace(/'/g, '%27')}'))">Aprovar e salvar</button>
       </div>`).join('');
     if (s.running) setTimeout(carregarAutomacaoMidia, 3000);
