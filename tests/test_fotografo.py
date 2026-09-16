@@ -1,6 +1,7 @@
 """Testes do papel fotografo: cadastro com role, fila, upload de foto,
 servir/listar fotos, zip por loja."""
 import io
+import json
 import os
 import sys
 import zipfile
@@ -159,6 +160,64 @@ def test_admin_inicia_automacao_midia_em_lote(client, monkeypatch):
 def test_admin_automacao_midia_exige_autenticacao(client):
     assert client.get("/api/admin/midia/automacao").status_code == 401
     assert client.post("/api/admin/midia/automacao", json={"limit": 20}).status_code == 401
+
+
+def test_busca_automatica_prioriza_nome_e_filtra_resultado_irrelevante(monkeypatch):
+    chamadas = []
+
+    class Resposta:
+        def __init__(self, payload):
+            self.payload = payload
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self.payload
+
+    def get_fake(url, params=None, **kwargs):
+        chamadas.append((url, params))
+        if "open" in url:
+            return Resposta({"product": {}})
+        if params["q"] == "SHAMPOO PROHALL DETOX 1L":
+            return Resposta({"results": [
+                {"title": "Shampoo Prohall Detox 1 Litro", "secure_thumbnail": "https://img.test/certa.jpg"},
+                {"title": "Ventilador de mesa", "secure_thumbnail": "https://img.test/errada.jpg"},
+            ]})
+        return Resposta({"results": []})
+
+    monkeypatch.delenv("MERCADOLIVRE_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(server.requests, "get", get_fake)
+    opcoes = server._buscar_fotos_produto({
+        "descricao": "SHAMPOO PROHALL DETOX 1L", "ean": "7898744860553",
+    })
+    consultas_ml = [p["q"] for url, p in chamadas if "mercadolibre" in url]
+    assert consultas_ml[0] == "SHAMPOO PROHALL DETOX 1L"
+    assert [o["url"] for o in opcoes] == ["https://img.test/certa.jpg"]
+    assert opcoes[0]["confianca"] == "media"
+
+
+def test_worker_usa_bipados_preserva_candidatos_e_nao_repete(monkeypatch):
+    estados = []
+    anterior = {
+        "tentadosProdutoIds": [10],
+        "candidatos": [{"produtoId": 10, "url": "https://img.test/anterior.jpg"}],
+    }
+    monkeypatch.setattr(server, "_load_fotos", lambda: {"63": {}})
+    monkeypatch.setattr(server, "_load_json_file", lambda *args: anterior)
+    monkeypatch.setattr(server, "_produtos_bipados_ordenados", lambda filial: [
+        {"id": 10, "descricao": "Ja tentado", "ean": "10"},
+        {"id": 20, "descricao": "Novo produto", "ean": "20"},
+    ])
+    monkeypatch.setattr(server, "_buscar_fotos_produto", lambda produto: [
+        {"url": "https://img.test/nova.jpg", "fonte": "teste", "confianca": "media", "contexto": "Novo"}
+    ])
+    monkeypatch.setattr(server, "_midia_auto_save", lambda state: estados.append(json.loads(json.dumps(state))))
+    monkeypatch.setattr(server.time, "sleep", lambda _: None)
+    server._midia_auto_worker(50)
+    final = estados[-1]
+    assert final["total"] == 1
+    assert final["processados"] == 1
+    assert final["tentadosProdutoIds"] == [10, 20]
+    assert [c["produtoId"] for c in final["candidatos"]] == [10, 20]
 
 
 def test_fila_fotografo_admin_sem_filial_id_retorna_400(client):

@@ -482,11 +482,21 @@ def _save_fotos(fotos):
         json.dump(fotos, f, ensure_ascii=False)
 
 
-def _buscar_foto_ean(ean):
-    """Fontes com identificador exato. Mercado Livre entra quando o admin
-    configurar um token; as bases abertas funcionam sem chave."""
+def _adicionar_candidato(lista, vistos, url, fonte, confianca, contexto=None):
+    if not isinstance(url, str) or not url.startswith("https://") or url in vistos:
+        return
+    vistos.add(url)
+    lista.append({"url": url, "fonte": fonte, "confianca": confianca,
+                  "contexto": contexto or ""})
+
+
+def _buscar_fotos_produto(produto):
+    """Busca pelo nome e usa fontes de barcode como confirmacao adicional."""
+    ean = str(produto.get("ean") or "").strip()
+    descricao = str(produto.get("descricao") or "").strip()
+    candidatos, vistos = [], set()
     token_ml = os.environ.get("MERCADOLIVRE_ACCESS_TOKEN")
-    if token_ml:
+    if token_ml and ean:
         try:
             r = requests.get("https://api.mercadolibre.com/products/search",
                              params={"site_id": "MLB", "status": "active", "q": ean},
@@ -497,23 +507,50 @@ def _buscar_foto_ean(ean):
                 gtins = {str(a.get("value_name") or "") for a in attrs if a.get("id") in ("GTIN", "EAN")}
                 pics = product.get("pictures") or []
                 if ean in gtins and pics and pics[0].get("url"):
-                    return pics[0]["url"], "Mercado Livre"
+                    _adicionar_candidato(candidatos, vistos, pics[0]["url"],
+                                         "Mercado Livre (EAN confirmado)", "alta")
         except (requests.RequestException, ValueError):
             pass
-    for domain, fonte in (("world.openbeautyfacts.org", "Open Beauty Facts"),
-                          ("world.openproductsfacts.org", "Open Products Facts"),
-                          ("world.openfoodfacts.org", "Open Food Facts")):
+    if ean:
+        for domain, fonte in (("world.openbeautyfacts.org", "Open Beauty Facts"),
+                              ("world.openproductsfacts.org", "Open Products Facts"),
+                              ("world.openfoodfacts.org", "Open Food Facts")):
+            try:
+                r = requests.get(f"https://{domain}/api/v2/product/{ean}.json",
+                                 params={"fields": "code,image_front_url,image_url"},
+                                 headers={"User-Agent": "AtualizacaoEstoque/1.1 (product image review)"}, timeout=8)
+                r.raise_for_status()
+                p = r.json().get("product") or {}
+                url = p.get("image_front_url") or p.get("image_url")
+                if str(p.get("code")) == ean and url:
+                    _adicionar_candidato(candidatos, vistos, url, fonte, "alta")
+            except (requests.RequestException, ValueError):
+                pass
+
+    # Nome primeiro, como solicitado. EAN entra depois como busca adicional.
+    consultas = [(descricao, "media")] if descricao else []
+    if ean:
+        consultas.append((ean, "alta"))
+    for consulta, confianca in consultas:
+        if len(candidatos) >= 4:
+            break
         try:
-            r = requests.get(f"https://{domain}/api/v2/product/{ean}.json",
-                             params={"fields": "code,image_front_url"},
-                             headers={"User-Agent": "AtualizacaoEstoque/1.0"}, timeout=8)
+            r = requests.get("https://api.mercadolibre.com/sites/MLB/search",
+                             params={"q": consulta, "limit": 8}, timeout=10)
             r.raise_for_status()
-            p = r.json().get("product") or {}
-            if str(p.get("code")) == ean and p.get("image_front_url"):
-                return p["image_front_url"], fonte
+            for item in r.json().get("results", []):
+                titulo = str(item.get("title") or "")
+                if confianca == "media" and fuzz.token_set_ratio(descricao.upper(), titulo.upper()) < 58:
+                    continue
+                url = item.get("secure_thumbnail") or item.get("thumbnail")
+                _adicionar_candidato(candidatos, vistos, url,
+                                     "Mercado Livre" + (" (nome)" if confianca == "media" else " (EAN)"),
+                                     confianca, titulo)
+                if len(candidatos) >= 4:
+                    break
         except (requests.RequestException, ValueError):
             pass
-    return None, None
+    return candidatos
 
 
 def _midia_auto_save(state):
@@ -526,30 +563,38 @@ def _midia_auto_worker(limit):
     try:
         fotos = _load_fotos()
         existentes = set((fotos.get("63") or {}).keys())
-        estoque_ids = {e.get("idproduto") for e in CACHE.get("estoques", [])
-                       if e.get("filial") == 63 and float(e.get("qtd") or 0) > 0}
-        produtos = [p for p in CACHE.get("produtos", []) if p.get("id") in estoque_ids
-                    and str(p.get("id")) not in existentes and str(p.get("ean") or "").isdigit()]
+        anterior = _load_json_file(MIDIA_AUTO_FILE, {})
+        tentados = {int(pid) for pid in anterior.get("tentadosProdutoIds", [])
+                    if str(pid).isdigit()}
+        candidatos = [c for c in anterior.get("candidatos", [])
+                      if str(c.get("produtoId")) not in existentes]
+        produtos = [p for p in _produtos_bipados_ordenados(63)
+                    if str(p.get("id")) not in existentes and p.get("id") not in tentados]
         if limit:
             produtos = produtos[:limit]
         state = {"running": True, "total": len(produtos), "processados": 0,
                  "encontrados": 0, "naoEncontrados": 0, "erros": 0,
-                 "iniciadoEm": datetime.now().isoformat(), "atual": None}
+                 "iniciadoEm": datetime.now().isoformat(), "atual": None,
+                 "candidatos": candidatos[-500:],
+                 "tentadosProdutoIds": sorted(tentados)}
         _midia_auto_save(state)
         for produto in produtos:
             state["atual"] = {"id": produto["id"], "descricao": produto.get("descricao")}
             ean = str(produto.get("ean"))
-            url, fonte = _buscar_foto_ean(ean)
-            if url:
-                # Registra candidato exato para revisão; não mistura embalagem
-                # errada no acervo sem decisão do administrador.
-                state.setdefault("candidatos", []).append({"produtoId": produto["id"],
-                    "descricao": produto.get("descricao"), "ean": ean, "url": url, "fonte": fonte})
+            opcoes = _buscar_fotos_produto(produto)
+            if opcoes:
+                # Mantem opcoes para revisao; nenhuma embalagem encontrada por
+                # nome e salva sem a decisao do administrador.
+                for opcao in opcoes:
+                    state["candidatos"].append({"produtoId": produto["id"],
+                        "descricao": produto.get("descricao"), "ean": ean, **opcao})
                 state["encontrados"] += 1
             else:
                 state["naoEncontrados"] += 1
+            tentados.add(produto["id"])
+            state["tentadosProdutoIds"] = sorted(tentados)
             state["processados"] += 1
-            state["candidatos"] = state.get("candidatos", [])[-200:]
+            state["candidatos"] = state.get("candidatos", [])[-500:]
             _midia_auto_save(state)
             time.sleep(1)
         state.update({"running": False, "atual": None, "finalizadoEm": datetime.now().isoformat()})
